@@ -1,0 +1,9 @@
+# Dependências de execução do laboratório Amazon SQS
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29,<1.0
+boto3>=1.34,<2.0
+
+# Dependências de teste e desenvolvimento
+pytest>=8.0,<9.0
+hypothesis>=6.100,<7.0
+httpx>=0.27,<1.0
