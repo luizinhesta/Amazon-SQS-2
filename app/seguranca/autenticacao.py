@@ -115,6 +115,11 @@ class ControladorAutenticacao:
         origens_autorizadas: coleção de origens explicitamente autorizadas a tentar
             autenticar. Quando omitida, inicia vazia e pode ser preenchida via
             :meth:`autorizar_origem`.
+        permitir_todas_origens: quando ``True``, qualquer origem é considerada
+            autorizada (modo laboratório aberto), independentemente do conjunto
+            ``origens_autorizadas``. A lógica de bloqueio por falhas consecutivas
+            permanece intacta. Padrão: ``False``, preservando o comportamento de
+            restrição às origens autorizadas (Req. 12.7).
         max_tentativas: número de falhas consecutivas que dispara o bloqueio.
             Padrão: ``MAX_TENTATIVAS_AUTENTICACAO`` (5).
         bloqueio_segundos: duração do bloqueio em segundos.
@@ -128,6 +133,7 @@ class ControladorAutenticacao:
         self,
         origens_autorizadas: Iterable[str] | None = None,
         *,
+        permitir_todas_origens: bool = False,
         max_tentativas: int = c.MAX_TENTATIVAS_AUTENTICACAO,
         bloqueio_segundos: int = c.BLOQUEIO_AUTENTICACAO_SEGUNDOS,
         relogio: Callable[[], float] = time.monotonic,
@@ -140,6 +146,7 @@ class ControladorAutenticacao:
         self._max_tentativas = max_tentativas
         self._bloqueio_segundos = bloqueio_segundos
         self._relogio = relogio
+        self._permitir_todas_origens = permitir_todas_origens
         self._origens_autorizadas: set[str] = set(origens_autorizadas or ())
         self._estado_por_origem: dict[str, _EstadoOrigem] = {}
 
@@ -154,7 +161,14 @@ class ControladorAutenticacao:
         self._origens_autorizadas.discard(origem)
 
     def origem_autorizada(self, origem: str) -> bool:
-        """Retorna ``True`` se ``origem`` está entre as origens autorizadas."""
+        """Retorna ``True`` se ``origem`` está autorizada a tentar autenticar.
+
+        No modo laboratório aberto (``permitir_todas_origens=True``), qualquer
+        origem é autorizada. Caso contrário, apenas as origens explicitamente
+        presentes no conjunto de origens autorizadas (Req. 12.7).
+        """
+        if self._permitir_todas_origens:
+            return True
         return origem in self._origens_autorizadas
 
     # -- Consulta de bloqueio ----------------------------------------------

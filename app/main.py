@@ -49,6 +49,7 @@ Referências de requisitos: 1.6, 1.8, 8.1, 8.2, 10.1, 10.2, 12.1, 12.2.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -62,6 +63,7 @@ from app.acesso.sqs_gateway import SqsGateway
 from app.api.app import create_app
 from app.api.esquemas import TIPO_CONSUMIDOR_FIFO, TIPO_CONSUMIDOR_STANDARD
 from app.api.estado_instancias import EstadoInstanciasConsumidores
+from app.api.servico_autenticacao import CredenciaisDashboard
 from app.consumidores.consumidor_fifo import ConsumidorFifo
 from app.consumidores.consumidor_standard import (
     ConsumidorStandard,
@@ -69,11 +71,25 @@ from app.consumidores.consumidor_standard import (
     gerar_consumer_id,
 )
 from app.dominio import constantes as c
+from app.seguranca.autenticacao import ControladorAutenticacao
 from app.verificacao_inicializacao import (
     ResultadoVerificacao,
     VerificadorTabela,
     verificar_inicializacao,
 )
+
+# Nomes das variáveis de ambiente que configuram a autenticação do Dashboard em
+# produção (EC2). Nenhum segredo fica no código: os valores são lidos do ambiente
+# (ex.: via ``Environment=`` no serviço systemd) e nunca de Access Keys da AWS.
+ENV_ORIGENS_AUTORIZADAS: str = "DASHBOARD_ORIGENS_AUTORIZADAS"
+ENV_LIBERAR_TODAS_ORIGENS: str = "DASHBOARD_LIBERAR_TODAS_ORIGENS"
+ENV_USUARIO: str = "DASHBOARD_USUARIO"
+ENV_SENHA: str = "DASHBOARD_SENHA"
+
+# Credenciais de laboratório usadas apenas quando as envs não são definidas, para
+# não quebrar o uso local. Em produção, defina DASHBOARD_USUARIO/DASHBOARD_SENHA.
+USUARIO_PADRAO_LABORATORIO: str = "admin"
+SENHA_PADRAO_LABORATORIO: str = "trocar-no-console"
 
 # Diretório do Dashboard estático (``web/``), relativo à raiz do projeto. Mantido
 # configurável para testes e para implantações que posicionem o frontend em outro
@@ -245,6 +261,68 @@ def _montar_dashboard_indisponivel(app: FastAPI, resultado: ResultadoVerificacao
 
 
 # ---------------------------------------------------------------------------
+# Configuração de autenticação a partir de variáveis de ambiente (Req. 12.5, 12.7)
+# ---------------------------------------------------------------------------
+def _str_para_booleano(valor: Optional[str]) -> bool:
+    """Interpreta uma env textual como booleano (``"true"``/``"1"`` → ``True``)."""
+    if valor is None:
+        return False
+    return valor.strip().lower() in {"true", "1", "sim", "yes"}
+
+
+def _construir_controlador_autenticacao(
+    ambiente: dict[str, str],
+    *,
+    emitir_aviso: Callable[[str], None],
+) -> ControladorAutenticacao:
+    """Constrói o :class:`ControladorAutenticacao` a partir do ambiente (Req. 12.7).
+
+    Regras de configuração:
+
+    - Se ``DASHBOARD_ORIGENS_AUTORIZADAS`` contém uma lista separada por vírgulas,
+      cada origem (IP) é autorizada explicitamente.
+    - Se o valor for ``"*"`` ou ``DASHBOARD_LIBERAR_TODAS_ORIGENS`` for verdadeiro
+      (``"true"``/``"1"``), ativa o modo laboratório aberto
+      (``permitir_todas_origens=True``), autorizando qualquer origem.
+    - Se nenhuma origem é configurada e a liberação total não é solicitada, registra
+      um aviso em pt-BR explicando que o login ficará bloqueado até configurar as
+      envs. Não libera todas as origens silenciosamente (seria inseguro).
+    """
+    valor_origens = (ambiente.get(ENV_ORIGENS_AUTORIZADAS) or "").strip()
+    liberar_todas_flag = _str_para_booleano(ambiente.get(ENV_LIBERAR_TODAS_ORIGENS))
+    liberar_todas = liberar_todas_flag or valor_origens == "*"
+
+    if liberar_todas:
+        return ControladorAutenticacao(permitir_todas_origens=True)
+
+    origens = [
+        origem.strip() for origem in valor_origens.split(",") if origem.strip()
+    ]
+
+    if not origens:
+        emitir_aviso(
+            "Aviso de segurança: nenhuma origem foi autorizada para o Dashboard. "
+            f"O login ficará bloqueado até configurar a variável de ambiente "
+            f"'{ENV_ORIGENS_AUTORIZADAS}' (lista de IPs separados por vírgula) ou "
+            f"'{ENV_LIBERAR_TODAS_ORIGENS}=true' (modo laboratório aberto)."
+        )
+
+    return ControladorAutenticacao(origens)
+
+
+def _construir_credenciais_dashboard(ambiente: dict[str, str]) -> CredenciaisDashboard:
+    """Monta as :class:`CredenciaisDashboard` a partir do ambiente (Req. 12.5).
+
+    Usa ``DASHBOARD_USUARIO``/``DASHBOARD_SENHA`` quando definidas; caso contrário,
+    mantém o par de laboratório padrão para não quebrar o uso local. Nenhum segredo
+    é fixado no código em produção: os valores vêm do ambiente.
+    """
+    usuario = ambiente.get(ENV_USUARIO) or USUARIO_PADRAO_LABORATORIO
+    senha = ambiente.get(ENV_SENHA) or SENHA_PADRAO_LABORATORIO
+    return CredenciaisDashboard(usuario=usuario, senha=senha)
+
+
+# ---------------------------------------------------------------------------
 # Composição da aplicação
 # ---------------------------------------------------------------------------
 def compor_aplicacao(
@@ -295,6 +373,20 @@ def compor_aplicacao(
         :class:`GerenciadorConsumidores` em ``app.state.gerenciador_consumidores``.
     """
     estado_instancias = estado_instancias or EstadoInstanciasConsumidores()
+
+    # Configura a autenticação a partir das variáveis de ambiente quando o chamador
+    # (ex.: testes) não injeta explicitamente o controlador/credenciais. Assim, em
+    # produção o login funciona com origens autorizadas via env, sem segredos no
+    # código (Req. 12.5, 12.7). A injeção por kwargs tem precedência e não é tocada.
+    if "controlador_autenticacao" not in kwargs:
+        kwargs["controlador_autenticacao"] = _construir_controlador_autenticacao(
+            dict(os.environ),
+            emitir_aviso=lambda mensagem: print(mensagem, file=sys.stderr),
+        )
+    if "credenciais_dashboard" not in kwargs:
+        kwargs["credenciais_dashboard"] = _construir_credenciais_dashboard(
+            dict(os.environ)
+        )
 
     app = create_app(
         gateway=gateway,

@@ -103,6 +103,25 @@ def test_origem_pode_ser_revogada() -> None:
     assert aval.resultado is ResultadoAutenticacao.ORIGEM_NAO_AUTORIZADA
 
 
+def test_permitir_todas_origens_autoriza_qualquer_origem() -> None:
+    relogio = RelogioFake()
+    # Modo laboratório aberto: nenhuma origem explícita, mas qualquer uma passa.
+    ctrl = ControladorAutenticacao(permitir_todas_origens=True, relogio=relogio)
+    assert ctrl.origem_autorizada("198.51.100.7") is True
+    aval = ctrl.avaliar_tentativa("198.51.100.7", credenciais_validas=True)
+    assert aval.resultado is ResultadoAutenticacao.SUCESSO
+    assert aval.acesso_concedido is True
+
+
+def test_permitir_todas_origens_mantem_bloqueio_por_falhas() -> None:
+    relogio = RelogioFake()
+    ctrl = ControladorAutenticacao(permitir_todas_origens=True, relogio=relogio)
+    # A lógica de bloqueio por falhas consecutivas permanece intacta.
+    for _ in range(c.MAX_TENTATIVAS_AUTENTICACAO):
+        ctrl.avaliar_tentativa("198.51.100.7", credenciais_validas=False)
+    assert ctrl.esta_bloqueada("198.51.100.7") is True
+
+
 # ---------------------------------------------------------------------------
 # Bloqueio após 5 falhas consecutivas por 300 s (Req. 12.6)
 # ---------------------------------------------------------------------------

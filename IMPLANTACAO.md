@@ -1,11 +1,13 @@
-# Guia de Implantação Manual — Laboratório Amazon SQS
+﻿# Guia de Implantação Manual — Laboratório Amazon SQS
 
 Este documento descreve, passo a passo e em ordem sequencial, como criar **manualmente no Console AWS** toda a infraestrutura do laboratório didático de Amazon SQS e como instalar e operar a aplicação na instância EC2. Todos os recursos são criados pelo próprio usuário no Console AWS; a aplicação **nunca cria, modifica ou exclui recursos AWS** e **não utiliza Infrastructure as Code** (Terraform, CloudFormation ou CDK).
 
 - **Região de todos os recursos:** `us-east-1` (Norte da Virgínia).
 - **Autenticação com a AWS:** exclusivamente pela IAM_Role_EC2 anexada à instância EC2 (credenciais temporárias, sem Access Keys fixas).
 - **Administração da EC2:** apenas via AWS Systems Manager Session Manager, com a porta `22` (SSH) **fechada**.
-- **Idioma:** o texto é em português do Brasil; nomes de serviços, parâmetros, recursos e comandos permanecem em inglês.
+- **Idioma:** este guia pressupõe o **Console AWS configurado em Português (Brasil)**. Os rótulos de menus e botões são apresentados em português do Brasil, com o termo original em inglês entre parênteses na primeira ocorrência, pois alguns rótulos podem variar conforme a versão do Console. Nomes de serviços, de recursos, parâmetros técnicos e comandos permanecem em inglês.
+
+> **Dica — Mudar o idioma do Console para Português (Brasil):** role até o rodapé de qualquer página do Console AWS e, no seletor de idioma (canto inferior esquerdo), escolha **Português (Brasil)**.
 
 ## Nomes reais dos recursos
 
@@ -31,7 +33,7 @@ Valores de Config_Aplicada (iguais aos de `app/dominio/constantes.py`):
 - SSE_SQS (criptografia em repouso): habilitada em todas as filas.
 - Deduplicação por conteúdo: habilitada nas filas FIFO.
 
-> **Antes de começar:** confirme no canto superior direito do Console AWS que a região selecionada é **US East (N. Virginia) us-east-1**. Todos os passos abaixo pressupõem essa região.
+> **Antes de começar:** confirme no canto superior direito do Console AWS que a regiao selecionada e **Leste dos EUA (Norte da Virginia) us-east-1** (*US East (N. Virginia)*). Todos os passos abaixo pressupõem essa região.
 
 ---
 
@@ -41,49 +43,49 @@ A ordem recomendada é criar primeiro as DLQs e depois as filas principais, porq
 
 ### Etapa 1 — Criar a DLQ_Standard (`lab-sqs-standard-dlq`)
 
-1. Acesse o serviço **Amazon SQS** → **Create queue**.
-2. Em **Type**, selecione **Standard**.
-3. Em **Name**, informe `lab-sqs-standard-dlq`.
-4. Em **Configuration**, defina **Message retention period** = `14 days`.
-5. Em **Encryption**, selecione **Amazon SQS key (SSE-SQS)**.
-6. Deixe o restante com os valores padrão e clique em **Create queue**.
+1. Acesse o serviço **Amazon SQS** → **Criar fila** (*Create queue*).
+2. Em **Tipo** (*Type*), selecione **Standard**.
+3. Em **Nome** (*Name*), informe `lab-sqs-standard-dlq`.
+4. Em **Configuração** (*Configuration*), defina **Período de retenção de mensagens** (*Message retention period*) = `14 dias` (*14 days*).
+5. Em **Criptografia** (*Encryption*), selecione **Chave do Amazon SQS (SSE-SQS)** (*Amazon SQS key (SSE-SQS)*).
+6. Deixe o restante com os valores padrão e clique em **Criar fila** (*Create queue*).
 - **Resultado esperado:** a fila `lab-sqs-standard-dlq` aparece na lista com SSE-SQS habilitado e retenção de 14 dias. Anote o **ARN** exibido nos detalhes da fila.
 
 ### Etapa 2 — Criar a Fila_Principal_Standard (`lab-sqs-standard`)
 
-1. **Create queue** → **Type** = **Standard**.
-2. **Name** = `lab-sqs-standard`.
-3. Em **Configuration**:
-   - **Visibility timeout** = `30 seconds`.
-   - **Message retention period** = `4 days`.
-   - **Receive message wait time** = `20 seconds` (Long_Polling).
-4. Em **Encryption**, selecione **Amazon SQS key (SSE-SQS)**.
-5. Em **Dead-letter queue**, selecione **Enabled**, escolha `lab-sqs-standard-dlq` e defina **Maximum receives** = `2`.
-6. Clique em **Create queue**.
+1. **Criar fila** (*Create queue*) → **Tipo** (*Type*) = **Standard**.
+2. **Nome** (*Name*) = `lab-sqs-standard`.
+3. Em **Configuração** (*Configuration*):
+   - **Tempo limite de visibilidade** (*Visibility timeout*) = `30 segundos` (*30 seconds*).
+   - **Período de retenção de mensagens** (*Message retention period*) = `4 dias` (*4 days*).
+   - **Tempo de espera para recebimento de mensagem** (*Receive message wait time*) = `20 segundos` (*20 seconds*) — Long_Polling.
+4. Em **Criptografia** (*Encryption*), selecione **Chave do Amazon SQS (SSE-SQS)** (*Amazon SQS key (SSE-SQS)*).
+5. Em **Fila de mensagens mortas** (*Dead-letter queue*), selecione **Habilitada** (*Enabled*), escolha `lab-sqs-standard-dlq` e defina **Máximo de recebimentos** (*Maximum receives*) = `2`.
+6. Clique em **Criar fila** (*Create queue*).
 - **Resultado esperado:** a fila `lab-sqs-standard` aparece na lista com Visibility timeout 30 s, Long_Polling 20 s, SSE-SQS e Redrive_Policy apontando para `lab-sqs-standard-dlq` com maxReceiveCount 2.
 
 ### Etapa 3 — Criar a DLQ_FIFO (`lab-sqs-fifo-dlq.fifo`)
 
-1. **Create queue** → **Type** = **FIFO**.
-2. **Name** = `lab-sqs-fifo-dlq.fifo` (o sufixo `.fifo` é obrigatório).
-3. **Message retention period** = `14 days`.
-4. Em **Encryption**, selecione **Amazon SQS key (SSE-SQS)**.
-5. Em **FIFO queue settings**, marque **Content-based deduplication** = **Enabled**.
-6. Clique em **Create queue**.
+1. **Criar fila** (*Create queue*) → **Tipo** (*Type*) = **FIFO**.
+2. **Nome** (*Name*) = `lab-sqs-fifo-dlq.fifo` (o sufixo `.fifo` é obrigatório).
+3. **Período de retenção de mensagens** (*Message retention period*) = `14 dias` (*14 days*).
+4. Em **Criptografia** (*Encryption*), selecione **Chave do Amazon SQS (SSE-SQS)** (*Amazon SQS key (SSE-SQS)*).
+5. Em **Configurações de fila FIFO** (*FIFO queue settings*), marque **Desduplicação baseada em conteúdo** (*Content-based deduplication*) = **Habilitada** (*Enabled*).
+6. Clique em **Criar fila** (*Create queue*).
 - **Resultado esperado:** a fila `lab-sqs-fifo-dlq.fifo` aparece na lista como FIFO com SSE-SQS e retenção de 14 dias. Anote o **ARN**.
 
 ### Etapa 4 — Criar a Fila_Principal_FIFO (`lab-sqs-fifo.fifo`)
 
-1. **Create queue** → **Type** = **FIFO**.
-2. **Name** = `lab-sqs-fifo.fifo`.
-3. Em **Configuration**:
-   - **Visibility timeout** = `30 seconds`.
-   - **Message retention period** = `4 days`.
-   - **Receive message wait time** = `20 seconds`.
-4. Em **Encryption**, selecione **Amazon SQS key (SSE-SQS)**.
-5. Em **FIFO queue settings**, marque **Content-based deduplication** = **Enabled**.
-6. Em **Dead-letter queue**, selecione **Enabled**, escolha `lab-sqs-fifo-dlq.fifo` e defina **Maximum receives** = `2`.
-7. Clique em **Create queue**.
+1. **Criar fila** (*Create queue*) → **Tipo** (*Type*) = **FIFO**.
+2. **Nome** (*Name*) = `lab-sqs-fifo.fifo`.
+3. Em **Configuração** (*Configuration*):
+   - **Tempo limite de visibilidade** (*Visibility timeout*) = `30 segundos` (*30 seconds*).
+   - **Período de retenção de mensagens** (*Message retention period*) = `4 dias` (*4 days*).
+   - **Tempo de espera para recebimento de mensagem** (*Receive message wait time*) = `20 segundos` (*20 seconds*).
+4. Em **Criptografia** (*Encryption*), selecione **Chave do Amazon SQS (SSE-SQS)** (*Amazon SQS key (SSE-SQS)*).
+5. Em **Configurações de fila FIFO** (*FIFO queue settings*), marque **Desduplicação baseada em conteúdo** (*Content-based deduplication*) = **Habilitada** (*Enabled*).
+6. Em **Fila de mensagens mortas** (*Dead-letter queue*), selecione **Habilitada** (*Enabled*), escolha `lab-sqs-fifo-dlq.fifo` e defina **Máximo de recebimentos** (*Maximum receives*) = `2`.
+7. Clique em **Criar fila** (*Create queue*).
 - **Resultado esperado:** a fila `lab-sqs-fifo.fifo` aparece como FIFO com Visibility timeout 30 s, Long_Polling 20 s, SSE-SQS, deduplicação por conteúdo e Redrive_Policy para `lab-sqs-fifo-dlq.fifo` com maxReceiveCount 2.
 
 > **Tratamento de falha (Parte 1):** se não for possível selecionar a DLQ ao criar a fila principal, confirme que a DLQ foi criada **no mesmo tipo** (Standard com Standard, FIFO com FIFO) e **na mesma região**. SQS exige que a DLQ seja do mesmo tipo da fila principal. Corrija a DLQ antes de prosseguir.
@@ -96,25 +98,25 @@ A Tabela_Historico é um **log de eventos append-only**. O modelo de evento da a
 
 ### Etapa 5 — Criar a tabela `lab-sqs-historico`
 
-1. Acesse o serviço **DynamoDB** → **Tables** → **Create table**.
-2. **Table name** = `lab-sqs-historico`.
-3. **Partition key** = `PK` (tipo **String**).
-4. **Sort key** = `SK` (tipo **String**).
-5. Em **Table settings**, escolha **Customize settings**.
-6. Em **Table class**, mantenha **DynamoDB Standard**.
-7. Em **Capacity mode**, selecione **On-demand** (PAY_PER_REQUEST), adequado à carga variável de laboratório.
-8. Em **Secondary indexes**, clique em **Create global index** e configure:
-   - **Partition key** = `GSI1PK` (tipo **String**).
-   - **Sort key** = `GSI1SK` (tipo **String**).
-   - **Index name** = `GSI1`.
-   - **Attribute projections** = **All**.
+1. Acesse o serviço **DynamoDB** → **Tabelas** (*Tables*) → **Criar tabela** (*Create table*).
+2. **Nome da tabela** (*Table name*) = `lab-sqs-historico`.
+3. **Chave de partição** (*Partition key*) = `PK` (tipo **String**).
+4. **Chave de classificação** (*Sort key*) = `SK` (tipo **String**).
+5. Em **Configurações da tabela** (*Table settings*), escolha **Personalizar configurações** (*Customize settings*).
+6. Em **Classe da tabela** (*Table class*), mantenha **DynamoDB Standard**.
+7. Em **Modo de capacidade** (*Capacity mode*), selecione **Sob demanda** (*On-demand*) — PAY_PER_REQUEST, adequado à carga variável de laboratório.
+8. Em **Índices secundários** (*Secondary indexes*), clique em **Criar índice global** (*Create global index*) e configure:
+   - **Chave de partição** (*Partition key*) = `GSI1PK` (tipo **String**).
+   - **Chave de classificação** (*Sort key*) = `GSI1SK` (tipo **String**).
+   - **Nome do índice** (*Index name*) = `GSI1`.
+   - **Projeções de atributos** (*Attribute projections*) = **Tudo** (*All*).
 9. Em **Encryption at rest**, mantenha a chave gerenciada (**Owned by Amazon DynamoDB** ou **AWS managed key**).
 10. Clique em **Create table**.
-- **Resultado esperado:** a tabela `lab-sqs-historico` fica com status **Active**, chave `PK`/`SK` e o índice `GSI1` com chave `GSI1PK`/`GSI1SK`.
+- **Resultado esperado:** a tabela `lab-sqs-historico` fica com status **Ativa** (*Active*), chave `PK`/`SK` e o índice `GSI1` com chave `GSI1PK`/`GSI1SK`.
 
 > **Observação sobre atributos:** no DynamoDB só se declaram os atributos usados em chaves (`PK`, `SK`, `GSI1PK`, `GSI1SK`). Os demais atributos do item de evento (`order_id`, `queue_name`, `event_type`, `event_source`, `app_time`, `app_time_ms`, `consumer_id`, `receive_count`, `processing_seconds`, `message_group_id`, `sqs_message_id`, `error_detail`) são gravados dinamicamente pela aplicação e **não** precisam ser declarados na criação da tabela.
 
-> **Tratamento de falha (Parte 2):** se a criação do índice falhar após a tabela já existir, aguarde a tabela sair de **Updating** e crie o `GSI1` em **Indexes** → **Create index**. Confirme que os nomes dos atributos-chave são exatamente `GSI1PK` e `GSI1SK`.
+> **Tratamento de falha (Parte 2):** se a criação do índice falhar após a tabela já existir, aguarde a tabela sair de **Atualizando** (*Updating*) e crie o `GSI1` em **Índices** (*Indexes*) → **Criar índice** (*Create index*). Confirme que os nomes dos atributos-chave são exatamente `GSI1PK` e `GSI1SK`.
 
 ---
 
@@ -124,7 +126,7 @@ A aplicação se autentica apenas pela IAM Role anexada à EC2 (sem Access Keys)
 
 ### Etapa 6 — Criar a policy de permissões mínimas
 
-1. Acesse **IAM** → **Policies** → **Create policy** → aba **JSON**.
+1. Acesse **IAM** → **Políticas** (*Policies*) → **Criar política** (*Create policy*) → aba **JSON**.
 2. Cole a policy abaixo, substituindo `<ACCOUNT_ID>` pelo ID da sua conta AWS:
 
 ```json
@@ -166,17 +168,17 @@ A aplicação se autentica apenas pela IAM Role anexada à EC2 (sem Access Keys)
 }
 ```
 
-3. Clique em **Next**, dê o nome `lab-sqs-policy-minima` e clique em **Create policy**.
+3. Clique em **Avançar** (*Next*), dê o nome `lab-sqs-policy-minima` e clique em **Criar política** (*Create policy*).
 - **Resultado esperado:** a policy `lab-sqs-policy-minima` concede apenas enviar, receber, excluir e consultar atributos nas quatro filas e ler/gravar/consultar a Tabela_Historico e seu índice `GSI1`, sem privilégios administrativos.
 
 ### Etapa 7 — Criar a IAM_Role_EC2
 
-1. Acesse **IAM** → **Roles** → **Create role**.
-2. Em **Trusted entity type**, selecione **AWS service** e, em **Use case**, escolha **EC2**.
-3. Em **Add permissions**, anexe:
+1. Acesse **IAM** → **Perfis** (*Roles*) → **Criar perfil** (*Create role*).
+2. Em **Tipo de entidade confiável** (*Trusted entity type*), selecione **Serviço da AWS** (*AWS service*) e, em **Caso de uso** (*Use case*), escolha **EC2**.
+3. Em **Adicionar permissões** (*Add permissions*), anexe:
    - a policy `lab-sqs-policy-minima` criada na Etapa 6;
-   - a policy gerenciada **`AmazonSSMManagedInstanceCore`** (necessária para o Session Manager).
-4. Em **Role name**, informe `IAM_Role_EC2` e clique em **Create role**.
+   - a política gerenciada **`AmazonSSMManagedInstanceCore`** (necessária para o Session Manager).
+4. Em **Nome do perfil** (*Role name*), informe `IAM_Role_EC2` e clique em **Criar perfil** (*Create role*).
 - **Resultado esperado:** a role `IAM_Role_EC2` existe com as duas policies anexadas e com a relação de confiança para o serviço `ec2.amazonaws.com`.
 
 > **Tratamento de falha (Parte 3):** se a aplicação reportar `AccessDenied` ao acessar SQS ou DynamoDB, confirme o `<ACCOUNT_ID>` e os nomes exatos dos recursos nos ARNs. Se o Session Manager não conectar, verifique se `AmazonSSMManagedInstanceCore` está anexada à role.
@@ -189,32 +191,32 @@ A arquitetura **não usa NAT Gateway nem Elastic Load Balancer** (para reduzir c
 
 ### Etapa 8 — Criar o Security Group
 
-1. Acesse **EC2** → **Security Groups** → **Create security group**.
-2. **Security group name** = `lab-sqs-sg`; informe uma descrição em inglês (ex.: `Lab SQS web access`).
+1. Acesse **EC2** → **Grupos de segurança** (*Security Groups*) → **Criar grupo de segurança** (*Create security group*).
+2. **Nome do grupo de segurança** (*Security group name*) = `lab-sqs-sg`; informe uma descrição (ex.: `Lab SQS web access`).
 3. **VPC**: selecione a VPC padrão da região.
-4. Em **Inbound rules**, adicione **apenas**:
-   - **Type** = **Custom TCP**, **Port range** = `8000`, **Source** = seu IP (ex.: `Meu IP`/`My IP`) ou a faixa de origens autorizadas. Essa é a porta em que a aplicação é servida pelo `uvicorn`.
+4. Em **Regras de entrada** (*Inbound rules*), adicione **apenas**:
+   - **Tipo** (*Type*) = **TCP personalizado** (*Custom TCP*), **Intervalo de portas** (*Port range*) = `8000`, **Origem** (*Source*) = seu IP (ex.: **Meu IP** / *My IP*) ou a faixa de origens autorizadas. Essa é a porta em que a aplicação é servida pelo `uvicorn`.
    - **Não** adicione regra para a porta `22`.
-5. Em **Outbound rules**, mantenha a regra padrão **All traffic** para `0.0.0.0/0` (necessária para a EC2 alcançar SQS, DynamoDB e os endpoints do SSM).
-6. Clique em **Create security group**.
+5. Em **Regras de saída** (*Outbound rules*), mantenha a regra padrão **Todo o tráfego** (*All traffic*) para `0.0.0.0/0` (necessária para a EC2 alcançar SQS, DynamoDB e os endpoints do SSM).
+6. Clique em **Criar grupo de segurança** (*Create security group*).
 - **Resultado esperado:** o Security Group `lab-sqs-sg` permite entrada apenas na porta `8000` a partir das origens autorizadas, sem porta `22` aberta, e permite saída total.
 
 ### Etapa 9 — Criar a instância EC2
 
-1. Acesse **EC2** → **Instances** → **Launch instances**.
-2. **Name** = `lab-sqs-ec2`.
-3. **Application and OS Images (AMI)**: selecione **Amazon Linux 2023** (x86_64).
-4. **Instance type**: `t3.micro` (ou `t2.micro` se elegível ao Free Tier).
-5. **Key pair**: selecione **Proceed without a key pair** — não haverá acesso por SSH; a administração é via Session Manager.
-6. Em **Network settings** → **Edit**:
+1. Acesse **EC2** → **Instâncias** (*Instances*) → **Executar instâncias** (*Launch instances*).
+2. **Nome** (*Name*) = `lab-sqs-ec2`.
+3. **Imagens de aplicações e sistema operacional (AMI)** (*Application and OS Images (AMI)*): selecione **Amazon Linux 2023** (x86_64).
+4. **Tipo de instância** (*Instance type*): `t3.micro` (ou `t2.micro` se elegível ao Nível Gratuito / *Free Tier*).
+5. **Par de chaves** (*Key pair*): selecione **Continuar sem um par de chaves** (*Proceed without a key pair*) — não haverá acesso por SSH; a administração é via Session Manager.
+6. Em **Configurações de rede** (*Network settings*) → **Editar** (*Edit*):
    - selecione a mesma VPC do Security Group;
-   - **Auto-assign public IP** = **Enable** (para que o navegador alcance a porta 8000);
-   - em **Firewall (security groups)**, selecione **Select existing security group** e escolha `lab-sqs-sg`.
-7. Em **Advanced details** → **IAM instance profile**, selecione `IAM_Role_EC2`.
-8. Clique em **Launch instance**.
-- **Resultado esperado:** a instância `lab-sqs-ec2` entra em estado **Running**, com IP público, usando o perfil `IAM_Role_EC2` e o Security Group `lab-sqs-sg`.
+   - **Atribuir IP público automaticamente** (*Auto-assign public IP*) = **Habilitar** (*Enable*) — para que o navegador alcance a porta 8000;
+   - em **Firewall (grupos de segurança)** (*Firewall (security groups)*), selecione **Selecionar grupo de segurança existente** (*Select existing security group*) e escolha `lab-sqs-sg`.
+7. Em **Detalhes avançados** (*Advanced details*) → **Perfil de instância do IAM** (*IAM instance profile*), selecione `IAM_Role_EC2`.
+8. Clique em **Executar instância** (*Launch instance*).
+- **Resultado esperado:** a instância `lab-sqs-ec2` entra em estado **Em execução** (*Running*), com IP público, usando o perfil `IAM_Role_EC2` e o Security Group `lab-sqs-sg`.
 
-> **Tratamento de falha (Parte 4):** se a instância não assumir a role, confirme o campo **IAM instance profile**. Caso o IP público não apareça, verifique **Auto-assign public IP** e as rotas da subnet (deve ter rota de saída para a internet via Internet Gateway).
+> **Tratamento de falha (Parte 4):** se a instância não assumir a role, confirme o campo **Perfil de instância do IAM** (*IAM instance profile*). Caso o IP público não apareça, verifique **Atribuir IP público automaticamente** (*Auto-assign public IP*) e as rotas da subnet (deve ter rota de saída para a internet via Internet Gateway).
 
 ---
 
@@ -223,11 +225,11 @@ A arquitetura **não usa NAT Gateway nem Elastic Load Balancer** (para reduzir c
 ### Etapa 10 — Conectar via Session Manager (porta 22 fechada)
 
 1. Pré-requisitos já atendidos: a role `IAM_Role_EC2` tem `AmazonSSMManagedInstanceCore` (Etapa 7) e a EC2 tem saída para a internet (Etapa 8/9). A AMI Amazon Linux 2023 já traz o **SSM Agent** pré-instalado.
-2. Acesse **Systems Manager** → **Fleet Manager** (ou **Session Manager** → **Managed nodes**) e confirme que `lab-sqs-ec2` aparece como **Managed node** (pode levar alguns minutos após o boot).
-3. Acesse **EC2** → **Instances** → selecione `lab-sqs-ec2` → **Connect** → aba **Session Manager** → **Connect**.
+2. Acesse **Systems Manager** → **Fleet Manager** (ou **Session Manager** → **Nós gerenciados** / *Managed nodes*) e confirme que `lab-sqs-ec2` aparece como **Nó gerenciado** (*Managed node*) — pode levar alguns minutos após o boot.
+3. Acesse **EC2** → **Instâncias** (*Instances*) → selecione `lab-sqs-ec2` → **Conectar** (*Connect*) → aba **Session Manager** → **Conectar** (*Connect*).
 - **Resultado esperado:** abre um terminal web da instância **sem usar SSH**. A porta `22` permanece fechada no Security Group.
 
-> **Tratamento de falha (Parte 5):** se a instância não aparecer como Managed node, verifique: (a) a role anexada tem `AmazonSSMManagedInstanceCore`; (b) a instância tem rota de saída para a internet (os endpoints do SSM são acessados por HTTPS); (c) aguarde o registro do SSM Agent concluir.
+> **Tratamento de falha (Parte 5):** se a instância não aparecer como nó gerenciado, verifique: (a) a role anexada tem `AmazonSSMManagedInstanceCore`; (b) a instância tem rota de saída para a internet (os endpoints do SSM são acessados por HTTPS); (c) aguarde o registro do SSM Agent concluir.
 
 ---
 
@@ -298,7 +300,7 @@ Para manter a aplicação rodando após fechar a sessão, use um serviço `syste
 ```bash
 sudo tee /etc/systemd/system/lab-sqs.service > /dev/null <<'EOF'
 [Unit]
-Description=Laboratorio Amazon SQS
+Description=Laboratório Amazon SQS
 After=network.target
 
 [Service]
@@ -347,10 +349,10 @@ http://<IP_PUBLICO_DA_EC2>:8000/
 - **Resultado esperado:** o Dashboard em pt-BR é exibido (tela de login e as cinco áreas: visão geral, envio, monitoramento, histórico e laboratório de falhas). Se a verificação tiver falhado, a página retorna HTTP 503 com a causa em pt-BR.
 
 3. Confirme os valores de Config_Aplicada no Console AWS:
-   - **SQS** → cada fila: Visibility timeout `30 s` (principais), Long_Polling `20 s`, SSE-SQS habilitado, retenção `4 dias` (principais) / `14 dias` (DLQs), Redrive_Policy com maxReceiveCount `2`, deduplicação por conteúdo nas FIFO.
-   - **DynamoDB** → `lab-sqs-historico`: status **Active**, chave `PK`/`SK`, índice `GSI1`.
+   - **SQS** → cada fila: tempo limite de visibilidade (Visibility timeout) `30 s` (principais), Long_Polling `20 s`, SSE-SQS habilitado, retenção `4 dias` (principais) / `14 dias` (DLQs), Redrive_Policy com maxReceiveCount `2`, deduplicação por conteúdo nas FIFO.
+   - **DynamoDB** → `lab-sqs-historico`: status **Ativa** (*Active*), chave `PK`/`SK`, índice `GSI1`.
    - **IAM** → `IAM_Role_EC2`: policies anexadas.
-   - **EC2** → `lab-sqs-ec2`: estado **Running**, perfil `IAM_Role_EC2`, Security Group `lab-sqs-sg` sem porta 22.
+   - **EC2* → `lab-sqs-ec2`: estado **Em execução** (*Running*), perfil `IAM_Role_EC2`, Security Group `lab-sqs-sg` sem porta 22.
 
 4. Teste funcional rápido: no Dashboard, envie uma mensagem para a fila Standard e verifique na área de monitoramento que a mensagem é recebida e processada; confirme que apareceram itens na tabela `lab-sqs-historico` do DynamoDB.
 - **Resultado esperado:** a mensagem percorre o ciclo (enviada → recebida → processada) e o histórico registra os eventos.
@@ -365,15 +367,15 @@ Ao encerrar o laboratório, **exclua todos os recursos** abaixo. A ordem respeit
 
 ### Etapa 16 — Lista nominal de exclusão (nesta ordem)
 
-1. **Instância EC2 `lab-sqs-ec2`** — EC2 → Instances → selecionar → **Instance state** → **Terminate instance**. (Exclua a EC2 antes do Security Group, pois o SG está em uso pela instância.)
-2. **Security Group `lab-sqs-sg`** — EC2 → Security Groups → selecionar → **Actions** → **Delete security group** (só é possível após a EC2 terminar).
-3. **Fila_Principal_Standard `lab-sqs-standard`** — SQS → selecionar → **Delete**.
-4. **DLQ_Standard `lab-sqs-standard-dlq`** — SQS → selecionar → **Delete**.
-5. **Fila_Principal_FIFO `lab-sqs-fifo.fifo`** — SQS → selecionar → **Delete**.
-6. **DLQ_FIFO `lab-sqs-fifo-dlq.fifo`** — SQS → selecionar → **Delete**.
-7. **Tabela_Historico `lab-sqs-historico`** — DynamoDB → Tables → selecionar → **Delete** (o índice `GSI1` é removido junto com a tabela).
-8. **IAM_Role_EC2 `IAM_Role_EC2`** — IAM → Roles → selecionar → **Delete**.
-9. **Policy `lab-sqs-policy-minima`** — IAM → Policies → selecionar → **Delete** (após a role que a usa ser excluída).
+1. **Instância EC2 `lab-sqs-ec2`** — EC2 → **Instâncias** (*Instances*) → selecionar → **Estado da instância** (*Instance state*) → **Encerrar instância** (*Terminate instance*). (Exclua a EC2 antes do Security Group, pois o SG está em uso pela instância.)
+2. **Security Group `lab-sqs-sg`** — EC2 → **Grupos de segurança** (*Security Groups*) → selecionar → **Ações** (*Actions*) → **Excluir grupo de segurança** (*Delete security group*) — só é possível após a EC2 terminar.
+3. **Fila_Principal_Standard `lab-sqs-standard`** — SQS → selecionar → **Excluir** (*Delete*).
+4. **DLQ_Standard `lab-sqs-standard-dlq`** — SQS → selecionar → **Excluir** (*Delete*).
+5. **Fila_Principal_FIFO `lab-sqs-fifo.fifo`** — SQS → selecionar → **Excluir** (*Delete*).
+6. **DLQ_FIFO `lab-sqs-fifo-dlq.fifo`** — SQS → selecionar → **Excluir** (*Delete*).
+7. **Tabela_Historico `lab-sqs-historico`** — DynamoDB → **Tabelas** (*Tables*) → selecionar → **Excluir** (*Delete*) — o índice `GSI1` é removido junto com a tabela.
+8. **IAM_Role_EC2 `IAM_Role_EC2`** — IAM → **Perfis** (*Roles*) → selecionar → **Excluir** (*Delete*).
+9. **Policy `lab-sqs-policy-minima`** — IAM → **Políticas** (*Policies*) → selecionar → **Excluir** (*Delete*) — após a role que a usa ser excluída.
 
 ### Etapa 17 — Confirmar ausência de recursos remanescentes
 
@@ -388,10 +390,10 @@ Valores aproximados para a região `us-east-1`, considerando uso leve e descart�
 
 | Recurso | Premissa de uso | Custo mensal estimado (USD) |
 |---------|-----------------|-----------------------------|
-| EC2 `t3.micro` (On-Demand, Linux) | ~730 h/mês ligada; `us-east-1` | ~`7.50` (0 no Free Tier com `t2.micro`/`t3.micro` por 750 h) |
+| EC2 `t3.micro` (On-Demand, Linux) | ~730 h/mês ligada; `us-east-1` | ~`7.50` (0 no Nível Gratuito (Free Tier) com `t2.micro`/`t3.micro` por 750 h) |
 | EBS (volume raiz gp3, 8 GB) | 8 GB persistentes | ~`0.64` |
 | Amazon SQS (4 filas) | Volume de laboratório, muito abaixo de 1 milhão de requisições/mês | ~`0.00` (1 milhão de requisições/mês no Free Tier) |
-| DynamoDB `lab-sqs-historico` (On-Demand) | Poucos milhares de escritas/leituras no mês | ~`0.00`–`0.50` (dentro ou perto do Free Tier) |
+| DynamoDB `lab-sqs-historico` (On-Demand) | Poucos milhares de escritas/leituras no mês | ~`0.00`–`0.50` (dentro ou perto do Nível Gratuito (Free Tier)) |
 | IAM Role / Security Group | Sem cobrança | `0.00` |
 | Session Manager (SSM) | Sem cobrança para gerência de nós | `0.00` |
 | **Total aproximado** | EC2 ligada o mês inteiro, sem Free Tier | **~`8` a `9` USD/mês** |

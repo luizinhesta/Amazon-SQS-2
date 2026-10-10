@@ -24,7 +24,14 @@ from fastapi.testclient import TestClient
 
 from app.acesso.sqs_gateway import SqsGateway
 from app.api.estado_instancias import EstadoInstanciasConsumidores
-from app.main import GerenciadorConsumidores, compor_aplicacao
+from app.main import (
+    ENV_LIBERAR_TODAS_ORIGENS,
+    ENV_ORIGENS_AUTORIZADAS,
+    ENV_SENHA,
+    ENV_USUARIO,
+    GerenciadorConsumidores,
+    compor_aplicacao,
+)
 from app.dominio import constantes as c
 
 
@@ -146,6 +153,92 @@ def test_consumidores_nao_iniciam_quando_verificacao_falha() -> None:
 
 
 # --- GerenciadorConsumidores: inicia o número de instâncias configurado ---
+
+
+# --- Autenticação configurada por variáveis de ambiente (Req. 12.5, 12.7) ---
+
+
+def _limpar_envs_autenticacao(monkeypatch) -> None:
+    """Remove as envs de autenticação para isolar cada cenário."""
+    for env in (
+        ENV_ORIGENS_AUTORIZADAS,
+        ENV_LIBERAR_TODAS_ORIGENS,
+        ENV_USUARIO,
+        ENV_SENHA,
+    ):
+        monkeypatch.delenv(env, raising=False)
+
+
+def test_origem_na_lista_autorizada_e_avaliada_normalmente(monkeypatch) -> None:
+    _limpar_envs_autenticacao(monkeypatch)
+    monkeypatch.setenv(ENV_ORIGENS_AUTORIZADAS, "189.115.219.11,203.0.113.9")
+
+    app = _compor(iniciar_consumidores=False)
+    controlador = app.state.controlador_autenticacao
+
+    # As origens configuradas são autorizadas; outras não.
+    assert controlador.origem_autorizada("189.115.219.11") is True
+    assert controlador.origem_autorizada("203.0.113.9") is True
+    assert controlador.origem_autorizada("10.0.0.1") is False
+
+
+def test_liberar_todas_origens_via_env_autoriza_qualquer_origem(monkeypatch) -> None:
+    _limpar_envs_autenticacao(monkeypatch)
+    monkeypatch.setenv(ENV_LIBERAR_TODAS_ORIGENS, "true")
+
+    app = _compor(iniciar_consumidores=False)
+    controlador = app.state.controlador_autenticacao
+
+    assert controlador.origem_autorizada("qualquer-ip") is True
+
+
+def test_asterisco_nas_origens_libera_todas(monkeypatch) -> None:
+    _limpar_envs_autenticacao(monkeypatch)
+    monkeypatch.setenv(ENV_ORIGENS_AUTORIZADAS, "*")
+
+    app = _compor(iniciar_consumidores=False)
+    assert app.state.controlador_autenticacao.origem_autorizada("10.0.0.5") is True
+
+
+def test_credenciais_via_env_sao_aplicadas(monkeypatch) -> None:
+    _limpar_envs_autenticacao(monkeypatch)
+    monkeypatch.setenv(ENV_USUARIO, "operador")
+    monkeypatch.setenv(ENV_SENHA, "senha-forte-123")
+
+    app = _compor(iniciar_consumidores=False)
+    credenciais = app.state.credenciais_dashboard
+
+    assert credenciais.conferem("operador", "senha-forte-123") is True
+    assert credenciais.conferem("admin", "trocar-no-console") is False
+
+
+def test_sem_envs_registra_aviso_e_nao_libera_todas(monkeypatch, capsys) -> None:
+    _limpar_envs_autenticacao(monkeypatch)
+
+    app = _compor(iniciar_consumidores=False)
+    controlador = app.state.controlador_autenticacao
+
+    # Comportamento seguro: nenhuma origem é liberada por padrão.
+    assert controlador.origem_autorizada("10.0.0.1") is False
+    # O aviso em pt-BR é emitido no stderr.
+    assert ENV_ORIGENS_AUTORIZADAS in capsys.readouterr().err
+
+
+def test_controlador_injetado_tem_precedencia_sobre_env(monkeypatch) -> None:
+    _limpar_envs_autenticacao(monkeypatch)
+    monkeypatch.setenv(ENV_LIBERAR_TODAS_ORIGENS, "true")
+
+    from app.seguranca.autenticacao import ControladorAutenticacao
+
+    controlador_injetado = ControladorAutenticacao(["203.0.113.9"])
+    app = _compor(
+        iniciar_consumidores=False,
+        controlador_autenticacao=controlador_injetado,
+    )
+
+    # A injeção explícita prevalece sobre a env (não vira modo aberto).
+    assert app.state.controlador_autenticacao is controlador_injetado
+    assert app.state.controlador_autenticacao.origem_autorizada("qualquer") is False
 
 
 def test_gerenciador_inicia_threads_por_instancia_configurada() -> None:
