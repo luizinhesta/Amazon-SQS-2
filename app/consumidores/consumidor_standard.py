@@ -58,6 +58,7 @@ from app.consumidores.idempotencia import (
     ResultadoIdempotencia,
     verificar_idempotencia,
 )
+from app.consumidores.payload_mensagem import PayloadMensagem, extrair_payload
 from app.consumidores.processamento import (
     CenarioFalha,
     FuncaoSleep,
@@ -71,8 +72,9 @@ from app.dominio import constantes as c
 # ---------------------------------------------------------------------------
 
 # Decide o Cenario_Falha de uma mensagem a partir dela própria (corpo/atributos).
-# Permite que os testes injetem desfechos específicos e que o laboratório derive o
-# cenário do payload. O padrão (:func:`cenario_sucesso`) trata tudo como SUCESSO.
+# Permite que os testes injetem desfechos específicos. Quando NÃO é fornecido
+# (``None``), o cenário é derivado do corpo JSON do produtor (contrato) e, na
+# ausência do campo, usa-se SUCESSO como padrão.
 SeletorCenario = Callable[[MensagemRecebida], CenarioFalha]
 
 # Deriva o Tempo_Processamento_Simulado (em segundos) de uma mensagem. O padrão
@@ -157,9 +159,13 @@ class ConsumidorStandard:
         nome_fila: Nome da fila de origem (padrão: ``FILA_STANDARD``).
         max_mensagens: Tamanho do lote por recebimento, de 1 a 10 (Req. 8.1).
         wait_time_seconds: WaitTimeSeconds do Long_Polling (padrão: 20 s, Req. 14.5).
-        seletor_cenario: Decide o Cenario_Falha de cada mensagem (padrão: SUCESSO).
+        seletor_cenario: Decide o Cenario_Falha de cada mensagem. Quando ``None``
+            (padrão), o cenário é derivado do corpo JSON do produtor; se o corpo
+            não trouxer o campo, usa SUCESSO.
         seletor_processing_seconds: Decide o Tempo_Processamento_Simulado por
-            mensagem (padrão: constante do laboratório).
+            mensagem. Quando ``None`` (padrão), é derivado do corpo JSON do
+            produtor; se o corpo não trouxer o campo, usa a constante do
+            laboratório.
         sleep: Função de espera injetável repassada ao processamento (padrão:
             ``time.sleep``; nos testes, um dublê sem espera real).
         verificar_idempotencia_fn: Callable de idempotência (padrão: implementação
@@ -175,7 +181,7 @@ class ConsumidorStandard:
     nome_fila: str = c.FILA_STANDARD
     max_mensagens: int = c.QUANTIDADE_MENSAGENS_MAX
     wait_time_seconds: int = c.LONG_POLLING_SEGUNDOS
-    seletor_cenario: SeletorCenario = cenario_sucesso
+    seletor_cenario: Optional[SeletorCenario] = None
     seletor_processing_seconds: Optional[SeletorProcessingSeconds] = None
     sleep: FuncaoSleep = time.sleep
     verificar_idempotencia_fn: FuncaoVerificarIdempotencia = verificar_idempotencia
@@ -261,12 +267,18 @@ class ConsumidorStandard:
     def _tratar_mensagem(self, mensagem: MensagemRecebida) -> None:
         """Aplica idempotência e, quando autorizado, processa e exclui a mensagem.
 
-        O ``order_id`` do laboratório vem do corpo da mensagem. A verificação de
-        idempotência decide se o processamento pode ocorrer; apenas na decisão
+        O corpo da mensagem segue o contrato do produtor (JSON com ``order_id``,
+        ``processing_seconds`` e ``cenario``); é interpretado por
+        :func:`~app.consumidores.payload_mensagem.extrair_payload`, com fallback
+        seguro que trata o corpo cru como ``order_id`` quando não for JSON válido.
+        O ``order_id`` extraído é usado na idempotência e no processamento. A
+        verificação de idempotência decide se o processamento pode ocorrer; apenas
+        na decisão
         :attr:`~app.consumidores.idempotencia.DecisaoIdempotencia.PROCESSAR` o
         processamento e a eventual exclusão são executados (Req. 9, 8.6).
         """
-        order_id = mensagem.body
+        payload = extrair_payload(mensagem.body)
+        order_id = payload.order_id
 
         resultado_idem = self.verificar_idempotencia_fn(
             self.historico,
@@ -290,8 +302,8 @@ class ConsumidorStandard:
             return
 
         # DecisaoIdempotencia.PROCESSAR: segue com o processamento (tarefa 10.4).
-        cenario = self.seletor_cenario(mensagem)
-        processing_seconds = self._processing_seconds(mensagem)
+        cenario = self._cenario(mensagem, payload)
+        processing_seconds = self._processing_seconds(mensagem, payload)
 
         resultado = self.processar_mensagem_fn(
             mensagem,
@@ -311,10 +323,32 @@ class ConsumidorStandard:
         else:
             self.estatisticas.falhas_processamento += 1
 
-    def _processing_seconds(self, mensagem: MensagemRecebida) -> int:
-        """Resolve o Tempo_Processamento_Simulado da mensagem (segundos)."""
+    def _cenario(
+        self, mensagem: MensagemRecebida, payload: PayloadMensagem
+    ) -> CenarioFalha:
+        """Resolve o Cenario_Falha a aplicar na mensagem.
+
+        Precedência: (1) seletor injetado explicitamente; (2) cenário vindo do
+        corpo JSON do produtor; (3) padrão SUCESSO.
+        """
+        if self.seletor_cenario is not None:
+            return self.seletor_cenario(mensagem)
+        if payload.cenario is not None:
+            return payload.cenario
+        return CenarioFalha.SUCESSO
+
+    def _processing_seconds(
+        self, mensagem: MensagemRecebida, payload: PayloadMensagem
+    ) -> int:
+        """Resolve o Tempo_Processamento_Simulado da mensagem (segundos).
+
+        Precedência: (1) seletor injetado explicitamente; (2) valor vindo do corpo
+        JSON do produtor; (3) constante padrão do laboratório.
+        """
         if self.seletor_processing_seconds is not None:
             return self.seletor_processing_seconds(mensagem)
+        if payload.processing_seconds is not None:
+            return payload.processing_seconds
         return c.TEMPO_PROCESSAMENTO_SIMULADO_SEGUNDOS
 
 

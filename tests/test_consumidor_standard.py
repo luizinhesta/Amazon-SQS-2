@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import json
+
 from app.acesso.sqs_gateway import MensagemRecebida
 from app.consumidores.consumidor_standard import (
     ConsumidorStandard,
@@ -26,7 +28,8 @@ from app.consumidores.consumidor_standard import (
     criar_consumidor_standard,
     gerar_consumer_id,
 )
-from app.consumidores.processamento import CenarioFalha
+from app.consumidores.idempotencia import DecisaoIdempotencia, ResultadoIdempotencia
+from app.consumidores.processamento import CenarioFalha, ResultadoProcessamento
 from app.dominio import constantes as c
 from app.dominio.evento import Evento
 from app.dominio.tipos import EventType
@@ -347,3 +350,97 @@ def test_fabrica_atribui_consumer_id_quando_ausente() -> None:
     c1 = criar_consumidor_standard(sqs, historico)  # type: ignore[arg-type]
     c2 = criar_consumidor_standard(sqs, historico)  # type: ignore[arg-type]
     assert c1.consumer_id != c2.consumer_id
+
+
+# ---------------------------------------------------------------------------
+# Contrato produtor/consumidor: corpo JSON é desserializado (não vira order_id)
+# ---------------------------------------------------------------------------
+
+
+def test_corpo_json_do_produtor_usa_order_id_extraido_na_idempotencia_e_processamento() -> None:
+    # Bug de contrato: o produtor envia o corpo como JSON; o consumidor deve
+    # extrair o order_id real, e NÃO usar o JSON inteiro como order_id.
+    corpo = json.dumps(
+        {
+            "order_id": "teste1-standard-0001",
+            "processing_seconds": 10,
+            "cenario": "sucesso",
+        }
+    )
+
+    order_ids_idempotencia: list[str] = []
+    parametros_processamento: list[dict[str, Any]] = []
+
+    def idem_fake(
+        repositorio: Any,
+        *,
+        order_id: Optional[str],
+        **kwargs: Any,
+    ) -> ResultadoIdempotencia:
+        order_ids_idempotencia.append(order_id)
+        return ResultadoIdempotencia(
+            decisao=DecisaoIdempotencia.PROCESSAR, order_id=order_id
+        )
+
+    def processar_fake(
+        mensagem: MensagemRecebida,
+        *,
+        order_id: Optional[str] = None,
+        cenario: CenarioFalha,
+        processing_seconds: int,
+        **kwargs: Any,
+    ) -> ResultadoProcessamento:
+        parametros_processamento.append(
+            {
+                "order_id": order_id,
+                "cenario": cenario,
+                "processing_seconds": processing_seconds,
+            }
+        )
+        return ResultadoProcessamento(
+            order_id=order_id or mensagem.body,
+            cenario=cenario,
+            sucesso=True,
+            excluida=True,
+        )
+
+    sqs = SqsFake(lotes=[[_mensagem(body=corpo, receipt_handle="rh1")]])
+    historico = HistoricoFake()
+    consumidor = _consumidor(
+        sqs,
+        historico,
+        verificar_idempotencia_fn=idem_fake,
+        processar_mensagem_fn=processar_fake,
+    )
+
+    consumidor.executar(max_iteracoes=1)
+
+    # O order_id usado é o EXTRAÍDO, não o JSON inteiro.
+    assert order_ids_idempotencia == ["teste1-standard-0001"]
+    assert parametros_processamento[0]["order_id"] == "teste1-standard-0001"
+    # Cenário e tempo também vêm do corpo JSON do produtor.
+    assert parametros_processamento[0]["cenario"] is CenarioFalha.SUCESSO
+    assert parametros_processamento[0]["processing_seconds"] == 10
+
+
+def test_corpo_json_do_produtor_deriva_cenario_de_falha_do_corpo() -> None:
+    # O cenário derivado do corpo preserva a mensagem (sem exclusão) em falha.
+    corpo = json.dumps(
+        {
+            "order_id": "teste1-standard-0002",
+            "processing_seconds": 1,
+            "cenario": "excecao_proposital",
+        }
+    )
+    sqs = SqsFake(lotes=[[_mensagem(body=corpo, receipt_handle="rh2")]])
+    historico = HistoricoFake()
+    consumidor = _consumidor(sqs, historico)
+
+    estat = consumidor.executar(max_iteracoes=1)
+
+    assert estat.falhas_processamento == 1
+    assert estat.processadas_com_sucesso == 0
+    assert sqs.exclusoes == []  # mensagem preservada
+    # O histórico foi particionado pelo order_id real (não pelo JSON inteiro).
+    assert historico.consultar_por_pedido("teste1-standard-0002")
+    assert historico.consultar_por_pedido(corpo) == []

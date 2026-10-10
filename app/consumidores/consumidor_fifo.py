@@ -66,6 +66,7 @@ from app.consumidores.idempotencia import (
     ResultadoIdempotencia,
     verificar_idempotencia,
 )
+from app.consumidores.payload_mensagem import extrair_payload
 from app.consumidores.processamento import (
     CenarioFalha,
     FuncaoSleep,
@@ -499,17 +500,33 @@ class ConsumidorFifo:
     def _order_id_da_mensagem(self, mensagem: MensagemRecebida) -> Optional[str]:
         """Obtém o ``order_id`` da mensagem.
 
-        No laboratório, o ``order_id`` costuma vir no corpo da mensagem; quando um
-        atributo ``order_id`` é fornecido, ele tem precedência. Mensagens sem corpo
-        resultam em ``None``, que a verificação de idempotência rejeita (Req. 9.3).
+        Precedência: (1) corpo JSON do produtor (contrato — ver
+        :func:`~app.consumidores.payload_mensagem.extrair_payload`); (2) atributo
+        de mensagem ``order_id``; (3) corpo cru como fallback. Mensagens sem corpo
+        nem atributo resultam em ``None``, que a verificação de idempotência
+        rejeita (Req. 9.3).
+
+        Como ``extrair_payload`` já aplica o fallback (corpo cru vira ``order_id``
+        quando o corpo não é JSON do contrato), o atributo ``order_id`` só prevalece
+        quando o corpo veio sem o campo no JSON (payload sem ``order_id``).
         """
+        payload = extrair_payload(mensagem.body)
+        if payload.order_id is not None:
+            return payload.order_id
         atributo = self._valor_atributo(mensagem, "order_id")
         if atributo is not None:
             return atributo
         return mensagem.body if mensagem.body else None
 
     def _cenario_da_mensagem(self, mensagem: MensagemRecebida) -> CenarioFalha:
-        """Obtém o Cenario_Falha da mensagem (atributo ``cenario``) ou o padrão."""
+        """Obtém o Cenario_Falha da mensagem.
+
+        Precedência: (1) corpo JSON do produtor; (2) atributo de mensagem
+        ``cenario``; (3) padrão da instância.
+        """
+        payload = extrair_payload(mensagem.body)
+        if payload.cenario is not None:
+            return payload.cenario
         bruto = self._valor_atributo(mensagem, "cenario")
         if bruto is None:
             return self._cenario_padrao
@@ -519,7 +536,14 @@ class ConsumidorFifo:
             return self._cenario_padrao
 
     def _processing_seconds_da_mensagem(self, mensagem: MensagemRecebida) -> int:
-        """Obtém o Tempo_Processamento_Simulado da mensagem ou o padrão."""
+        """Obtém o Tempo_Processamento_Simulado da mensagem.
+
+        Precedência: (1) corpo JSON do produtor; (2) atributo de mensagem
+        ``processing_seconds``; (3) padrão da instância.
+        """
+        payload = extrair_payload(mensagem.body)
+        if payload.processing_seconds is not None:
+            return payload.processing_seconds
         bruto = self._valor_atributo(mensagem, "processing_seconds")
         if bruto is None:
             return self._processing_seconds_padrao
