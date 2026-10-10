@@ -1,0 +1,1042 @@
+/*
+ * Estilos do Dashboard do Laboratório Amazon SQS (pt-BR).
+ *
+ * Tarefa 17.1 — estrutura/esqueleto: estilos da tela de login, do cabeçalho, da
+ * navegação entre as cinco áreas e dos containers de cada área. As Tarefas 17.2 a
+ * 17.5 acrescentam estilos específicos de cada área reutilizando as variáveis e os
+ * utilitários definidos aqui.
+ */
+
+:root {
+  --color-bg: #0f1b2d;
+  --color-surface: #16263d;
+  --color-surface-2: #1d3250;
+  --color-border: #2a3f5f;
+  --color-text: #e8eef7;
+  --color-text-muted: #9fb3cc;
+  --color-primary: #ff9900; /* laranja AWS */
+  --color-primary-contrast: #10243b;
+  --color-danger: #e05260;
+  --color-danger-bg: #3a1b22;
+  --color-success: #3ec07a;
+  --color-focus: #4a9eff;
+
+  --radius: 8px;
+  --gap: 16px;
+  --font-base: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-base);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* ------------------------------------------------------------------ */
+/* Botões                                                              */
+/* ------------------------------------------------------------------ */
+.btn {
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 10px 18px;
+  font-size: 1rem;
+  font-weight: 600;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-primary {
+  background-color: var(--color-primary);
+  color: var(--color-primary-contrast);
+}
+
+.btn-primary:hover {
+  background-color: #ffad33;
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background-color: transparent;
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.btn-ghost:hover {
+  background-color: var(--color-surface-2);
+}
+
+/* ------------------------------------------------------------------ */
+/* Tela de login (Req. 12.5, 12.6)                                     */
+/* ------------------------------------------------------------------ */
+.login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: var(--gap);
+}
+
+.login-card {
+  width: 100%;
+  max-width: 420px;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 32px;
+}
+
+.login-title {
+  margin: 0 0 8px;
+  font-size: 1.5rem;
+}
+
+.login-subtitle {
+  margin: 0 0 24px;
+  color: var(--color-text-muted);
+  font-size: 0.95rem;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field label {
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+}
+
+.field input,
+.field select {
+  background-color: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-text);
+  padding: 10px 12px;
+  font-size: 1rem;
+}
+
+.login-feedback {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+  font-size: 0.9rem;
+}
+
+.login-lockout {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+  font-weight: 600;
+}
+
+.login-lockout-icon {
+  font-size: 1.2rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Painel autenticado                                                  */
+/* ------------------------------------------------------------------ */
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  background-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.topbar-logo {
+  font-size: 1.4rem;
+}
+
+.topbar-title {
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.topbar-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+}
+
+.topbar-last-update {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+/* Navegação entre as cinco áreas */
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 24px;
+  background-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.nav-item {
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  border-bottom: 3px solid transparent;
+  color: var(--color-text-muted);
+  padding: 14px 16px;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.nav-item:hover {
+  color: var(--color-text);
+}
+
+.nav-item.is-active {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+}
+
+/* Faixa de status global (ex.: dados possivelmente desatualizados) */
+.global-status {
+  margin: 0;
+  padding: 10px 24px;
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+  font-size: 0.9rem;
+}
+
+/* Conteúdo e áreas */
+.content {
+  flex: 1;
+  padding: 24px;
+}
+
+.area-title {
+  margin: 0 0 var(--gap);
+  font-size: 1.3rem;
+}
+
+.area-placeholder {
+  color: var(--color-text-muted);
+  background-color: var(--color-surface);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius);
+  padding: 24px;
+}
+
+/* Utilitário de leitor de tela */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 640px) {
+  .topbar,
+  .nav,
+  .content,
+  .global-status {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+
+/* Observabilidade: atualização periódica (Tarefa 17.5) */
+/*
+ * Indicação visível de que os dados podem estar desatualizados após uma falha
+ * de atualização periódica (Req. 3.11, 13.5). A faixa .global-status já existe;
+ * o modificador abaixo a reestiliza como aviso (laranja AWS) para distinguir de
+ * um erro bloqueante e sinalizar que os últimos dados válidos foram preservados.
+ */
+.global-status--stale {
+  background-color: var(--color-primary-contrast);
+  color: var(--color-primary);
+  border-top: 1px solid var(--color-primary);
+  border-bottom: 1px solid var(--color-primary);
+  font-weight: 600;
+}
+
+.global-status--stale::before {
+  content: "⚠ ";
+  margin-right: 4px;
+}
+
+/* ============================================================= */
+/* Área: visão geral (Tarefa 17.2)                                */
+/* ============================================================= */
+/*
+  Estilos exclusivos da área de visão geral (web/js/areas/overview.js):
+  estatísticas por fluxo (Standard/FIFO), horário da última atualização
+  bem-sucedida, indicação de falha de atualização e os parâmetros de
+  Config_Aplicada/Config_Simulacao com ajuste dentro da faixa (Req. 2.*, 3.*).
+  Todas as classes têm o prefixo "ov-" para evitar conflito com outras tarefas.
+*/
+
+.ov-statusbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: var(--gap);
+}
+
+.ov-last-update {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+}
+
+.ov-last-update-value {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.ov-failure {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.ov-section {
+  margin-bottom: 28px;
+}
+
+.ov-section-title {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+  color: var(--color-text);
+}
+
+.ov-empty {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+/* --- Estatísticas por fluxo --- */
+.ov-flows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.ov-flow-card {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 18px;
+}
+
+.ov-flow-title {
+  margin: 0 0 12px;
+  font-size: 1rem;
+  color: var(--color-primary);
+}
+
+.ov-stat-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ov-stat-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.ov-stat-label {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.ov-stat-value {
+  margin: 0;
+  color: var(--color-text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-consumers {
+  margin-top: 14px;
+}
+
+.ov-consumers-title {
+  margin: 0 0 6px;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+
+/* --- Configuração (Config_Aplicada / Config_Simulacao) --- */
+.ov-config-orientation {
+  margin: 0 0 16px;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.ov-config-block {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 18px;
+  margin-bottom: 16px;
+}
+
+.ov-config-title {
+  margin: 0 0 6px;
+  font-size: 1rem;
+  color: var(--color-text);
+}
+
+.ov-config-hint {
+  margin: 0 0 14px;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.ov-param-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ov-param-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background-color: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+}
+
+.ov-param-adjustable {
+  border-left: 3px solid var(--color-success);
+}
+
+.ov-param-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ov-param-name {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.ov-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.ov-badge-applied {
+  background-color: var(--color-primary-contrast);
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary);
+}
+
+.ov-badge-sim {
+  background-color: rgba(62, 192, 122, 0.12);
+  color: var(--color-success);
+  border: 1px solid var(--color-success);
+}
+
+.ov-param-value {
+  color: var(--color-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-param-range {
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+}
+
+.ov-param-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ov-param-input-label {
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+.ov-param-input {
+  width: 110px;
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-text);
+  padding: 8px 10px;
+  font-size: 0.95rem;
+}
+
+.ov-param-apply {
+  padding: 8px 16px;
+  font-size: 0.9rem;
+}
+
+.ov-param-feedback {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  min-height: 1.1em;
+}
+
+.ov-param-feedback.is-ok {
+  color: var(--color-success);
+}
+
+.ov-param-feedback.is-error {
+  color: var(--color-danger);
+}
+
+@media (max-width: 640px) {
+  .ov-param-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ov-param-input {
+    width: 100%;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Áreas: histórico detalhado e laboratório de falhas (Tarefa 17.4)    */
+/* ------------------------------------------------------------------ */
+
+/* Histórico detalhado — formulário de consulta e linha do tempo (Req. 6.*) */
+.history-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.history-form {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--gap);
+  flex-wrap: wrap;
+}
+
+.history-form .field {
+  flex: 1 1 240px;
+  min-width: 220px;
+}
+
+.history-result-title {
+  margin: 0 0 var(--gap);
+  font-size: 1.1rem;
+}
+
+.history-message {
+  margin: 0;
+  padding: 16px;
+  border-radius: var(--radius);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+}
+
+.history-message-empty {
+  border-style: dashed;
+}
+
+.history-message-unavailable {
+  background-color: var(--color-danger-bg);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+/* Linha do tempo cronológica */
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 8px;
+}
+
+.timeline-item {
+  position: relative;
+  display: flex;
+  gap: var(--gap);
+  padding: 0 0 var(--gap) 20px;
+  border-left: 2px solid var(--color-border);
+}
+
+.timeline-item:last-child {
+  border-left-color: transparent;
+}
+
+.timeline-marker {
+  position: absolute;
+  left: -7px;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: var(--color-text-muted);
+  border: 2px solid var(--color-bg);
+}
+
+/* Distinção visual Observado (confirmado) × Inferido (deduzido) */
+.timeline-item.is-observed .timeline-marker {
+  background-color: var(--color-success);
+}
+
+.timeline-item.is-inferred .timeline-marker {
+  background-color: var(--color-primary);
+}
+
+.timeline-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  flex: 1;
+}
+
+.timeline-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.timeline-type {
+  font-weight: 700;
+}
+
+.timeline-time {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.timeline-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 6px 0 0;
+  font-size: 0.85rem;
+}
+
+.timeline-meta-label {
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.timeline-meta-value {
+  margin: 0;
+  word-break: break-word;
+}
+
+/* Indicador de origem (badge) — apenas exibição, sem interação (Req. 6.4) */
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.badge-observed {
+  background-color: rgba(62, 192, 122, 0.18);
+  color: var(--color-success);
+  border: 1px solid var(--color-success);
+}
+
+.badge-inferred {
+  background-color: rgba(255, 153, 0, 0.18);
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary);
+}
+
+/* Laboratório de falhas — cartões de cenário e DLQ (Req. 7.*, 10.7) */
+.lab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.lab-card {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+}
+
+.lab-card-title {
+  margin: 0 0 6px;
+  font-size: 1.1rem;
+}
+
+.lab-card-desc {
+  margin: 0 0 var(--gap);
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.lab-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.lab-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--gap);
+}
+
+.lab-form .field.is-disabled {
+  opacity: 0.55;
+}
+
+.lab-form .btn-primary {
+  align-self: flex-start;
+}
+
+.lab-output {
+  margin-top: var(--gap);
+}
+
+.lab-message {
+  margin: 0;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background-color: var(--color-surface-2);
+  color: var(--color-text);
+}
+
+.lab-message-loading {
+  color: var(--color-text-muted);
+}
+
+.lab-message-success {
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+.lab-message-error {
+  background-color: var(--color-danger-bg);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.lab-message-empty {
+  border-style: dashed;
+  color: var(--color-text-muted);
+}
+
+.lab-output-summary {
+  margin: 10px 0 0;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.lab-result-list {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  font-size: 0.9rem;
+}
+
+.lab-result-list .is-ok {
+  color: var(--color-success);
+}
+
+.lab-result-list .is-fail {
+  color: var(--color-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Áreas: envio e monitoramento (Tarefa 17.3)                          */
+/* ------------------------------------------------------------------ */
+
+/* --- Envio de mensagens (Req. 4.*) -------------------------------- */
+.send-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  max-width: 760px;
+}
+
+.send-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--gap);
+}
+
+.field-hint {
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+}
+
+.field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.field-inline label {
+  color: var(--color-text);
+}
+
+.field-inline input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.send-fifo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin: 0;
+}
+
+.send-fifo legend {
+  padding: 0 8px;
+  color: var(--color-primary);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.send-actions {
+  display: flex;
+  gap: var(--gap);
+}
+
+.send-feedback {
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background-color: var(--color-surface);
+  font-size: 0.9rem;
+}
+
+.send-feedback.is-error {
+  background-color: var(--color-danger-bg);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.send-feedback.is-success {
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+.send-feedback-title {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+
+.send-feedback-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+/* --- Monitoramento (Req. 5.*) ------------------------------------- */
+.monitoring-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+}
+
+.monitoring-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+}
+
+.monitoring-status {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.monitoring-error {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+  font-size: 0.9rem;
+}
+
+.monitoring-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.monitoring-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.monitoring-table th,
+.monitoring-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.monitoring-table thead th {
+  background-color: var(--color-surface-2);
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+.monitoring-table tbody tr:hover {
+  background-color: var(--color-surface);
+}
+
+.monitoring-table .col-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.monitoring-table .col-id {
+  font-weight: 600;
+}
+
+.monitoring-empty-row td {
+  color: var(--color-text-muted);
+  text-align: center;
+  padding: 24px;
+  white-space: normal;
+}
+
+.btn-sm {
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}
+
+/* Destaque do Estado derivado (Req. 5.4) */
+.estado-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.estado-neutro {
+  background-color: var(--color-surface-2);
+  color: var(--color-text-muted);
+}
+
+.estado-aguardando {
+  background-color: var(--color-surface-2);
+  color: var(--color-text);
+}
+
+.estado-recebida,
+.estado-processando {
+  background-color: #1e3a5f;
+  color: #8fc3ff;
+}
+
+.estado-processada {
+  background-color: #123528;
+  color: var(--color-success);
+}
+
+.estado-falha,
+.estado-dlq {
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.estado-retentativa {
+  background-color: #3a311b;
+  color: #e0c052;
+}

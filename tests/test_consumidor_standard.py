@@ -322,9 +322,10 @@ def test_metodo_parar_interrompe_o_laco() -> None:
         chamadas["n"] += 1
         if chamadas["n"] == 3:
             consumidor.parar()
+            return False
         return True
 
-    estat = consumidor.executar()
+    estat = consumidor.executar(continuar=continuar)
     # Executa 2 iterações; na 3ª verificação, parar() interrompe antes de iterar.
     assert estat.iteracoes == 2
 

@@ -139,16 +139,16 @@ Convenções:
 - [x] 11. Checkpoint — camadas de acesso e processamento validadas
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 12. Implementar o Consumidor_Standard
-  - [-] 12.1 Implementar o loop do Consumidor_Standard
+- [x] 12. Implementar o Consumidor_Standard
+  - [x] 12.1 Implementar o loop do Consumidor_Standard
     - Receber da Fila_Principal_Standard em lotes de 1–10 com Long_Polling (WaitTimeSeconds=20), aplicar idempotência e processamento, atribuir `consumer_id` único, registrar recebimento e repetir sem erro quando o recebimento vier vazio
     - _Requirements: 8.1, 8.11, 10.4, 14.5_
   - [ ]* 12.2 Escrever testes unitários do Consumidor_Standard com SQS/DynamoDB simulados
     - Fluxo feliz, falha e recebimento vazio
     - _Requirements: 8.1, 8.11_
 
-- [ ] 13. Implementar o Consumidor_FIFO
-  - [-] 13.1 Implementar o loop do Consumidor_FIFO com um único MessageGroupId por instância por vez
+- [x] 13. Implementar o Consumidor_FIFO
+  - [x] 13.1 Implementar o loop do Consumidor_FIFO com um único MessageGroupId por instância por vez
     - Receber da Fila_Principal_FIFO em lotes de 1–10 com Long_Polling (WaitTimeSeconds=20), processar um único `MessageGroupId` por vez preservando a ordem de recebimento dentro do grupo e aplicar idempotência/processamento
     - Suportar envio com Deduplicacao_Por_Conteudo e, quando desabilitada, `MessageDeduplicationId` informado
     - _Requirements: 8.2, 10.5, 10.6, 14.6, 4.6, 4.7_
@@ -165,11 +165,11 @@ Convenções:
     - **Property 17: Bloqueio de autenticação ativa após 5 falhas consecutivas**
     - **Validates: Requirements 12.6**
 
-- [ ] 15. Implementar os endpoints da API_Backend (FastAPI)
-  - [~] 15.1 Implementar os endpoints de configuração e saúde
+- [x] 15. Implementar os endpoints da API_Backend (FastAPI)
+  - [x] 15.1 Implementar os endpoints de configuração e saúde
     - `GET /api/saude` (verificação de inicialização), `GET /api/config` (Config_Aplicada e Config_Simulacao com rótulos distintos), `PUT /api/config/simulacao` (ajuste dentro das faixas); orientar em pt-BR que Config_Aplicada só muda no Console AWS
     - _Requirements: 1.6, 1.8, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.10, 2.11, 2.12, 2.13_
-  - [~] 15.2 Implementar o endpoint de envio de mensagens
+  - [x] 15.2 Implementar o endpoint de envio de mensagens
     - `POST /api/mensagens`: validar o payload, enviar 1–10 mensagens via SqsGateway e registrar exatamente um Evento_Observado `enviada` por mensagem; em falha parcial, preservar os envios anteriores e o erro original (pt-BR)
     - _Requirements: 4.1, 4.5, 4.8, 4.10, 4.11, 4.12_
   - [ ]* 15.3 Escrever teste de propriedade para o registro de envio bem-sucedido
@@ -178,62 +178,62 @@ Convenções:
   - [ ]* 15.4 Escrever teste de propriedade para falha parcial de envio
     - **Property 10: Falha parcial de envio preserva envios anteriores e o erro original**
     - **Validates: Requirements 4.12**
-  - [~] 15.5 Implementar os endpoints de estatísticas e monitoramento com timeout
+  - [x] 15.5 Implementar os endpoints de estatísticas e monitoramento com timeout
     - `GET /api/estatisticas` e `GET /api/monitoramento` usando agregador e StateDeriver; aplicar timeout de 3 s (p95 sob 10 requisições simultâneas) retornando indicação de timeout ao exceder
     - _Requirements: 3.1-3.8, 3.12, 5.1, 5.2, 5.3, 5.4, 5.5, 5.9, 5.10, 14.1, 14.2, 14.3, 14.4_
-  - [~] 15.6 Implementar os endpoints de histórico, laboratório e consumidores
+  - [x] 15.6 Implementar os endpoints de histórico, laboratório e consumidores
     - `GET /api/mensagens/{order_id}/historico` (linha do tempo), `POST /api/laboratorio/cenario`, `POST /api/laboratorio/reprocessar-dlq`, `PUT /api/consumidores/{tipo}/instancias` (1–10) e `POST /api/autenticacao`; interromper cenário com causa em pt-BR quando fila indisponível/autenticação falhar
     - _Requirements: 6.1, 6.2, 6.3, 6.7, 6.8, 7.1-7.11, 10.1, 10.2, 10.3, 10.7, 12.5, 12.6_
   - [ ]* 15.7 Escrever testes de integração dos endpoints da API
     - Fluxo ponta a ponta Standard (envio→recebimento→exclusão), reentrega por Visibility_Timeout, encaminhamento para DLQ, ordenação FIFO, concorrência (≥2 consumidores) e recuperação
     - _Requirements: 18.1, 18.2, 18.3, 18.4, 18.5, 18.6_
 
-- [~] 16. Checkpoint — API e consumidores integrados
+- [x] 16. Checkpoint — API e consumidores integrados
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 17. Implementar o Dashboard (HTML/CSS/JS, pt-BR)
-  - [~] 17.1 Implementar a estrutura do Dashboard e a tela de login
+- [x] 17. Implementar o Dashboard (HTML/CSS/JS, pt-BR)
+  - [x] 17.1 Implementar a estrutura do Dashboard e a tela de login
     - Montar as cinco áreas (visão geral, envio, monitoramento, histórico detalhado, laboratório de falhas) em pt-BR e a tela de login com indicação de bloqueio
     - _Requirements: 12.5, 12.6_
-  - [~] 17.2 Implementar a visão geral e a configuração
+  - [x] 17.2 Implementar a visão geral e a configuração
     - Exibir estatísticas por fluxo (Standard/FIFO), horário da última atualização bem-sucedida (data/hora/fuso) e os parâmetros com rótulo Config_Aplicada/Config_Simulacao; preservar últimos valores e indicar falha de atualização
     - _Requirements: 2.1-2.13, 3.1-3.12_
-  - [~] 17.3 Implementar o envio de mensagens e o monitoramento
+  - [x] 17.3 Implementar o envio de mensagens e o monitoramento
     - Formulário de envio (fila, quantidade, order_id, tempo, cenário, MessageGroupId/MessageDeduplicationId para FIFO) com validação em pt-BR; tabela de monitoramento (ID, Fila, Consumidor, Tentativas, Processamento, Estado, Último evento, Ações) e estados vazios/erro
     - _Requirements: 4.1-4.9, 5.1-5.8_
-  - [~] 17.4 Implementar o histórico detalhado e o laboratório de falhas
+  - [x] 17.4 Implementar o histórico detalhado e o laboratório de falhas
     - Linha do tempo cronológica com indicador Observado/Inferido por evento (sem interação), horário com fuso; painel de cenários de falha e comparação Standard×FIFO e por MessageGroupId
     - _Requirements: 6.1-6.8, 7.1-7.8, 10.7_
-  - [~] 17.5 Implementar a atualização periódica e a observabilidade
+  - [x] 17.5 Implementar a atualização periódica e a observabilidade
     - Atualizar estatísticas e monitoramento ao final de cada intervalo configurável (5–300 s, padrão 10 s; visão geral 1–60 s, padrão 5 s) sem recarregar; exibir horário da atualização e indicar dados possivelmente desatualizados em falha
     - _Requirements: 3.9, 3.10, 3.11, 13.1, 13.2, 13.3, 13.4, 13.5_
 
-- [ ] 18. Integração e wiring final da aplicação
-  - [~] 18.1 Compor a aplicação na EC2 (API + consumidores + Dashboard)
+- [x] 18. Integração e wiring final da aplicação
+  - [x] 18.1 Compor a aplicação na EC2 (API + consumidores + Dashboard)
     - Inicializar a API_Backend servindo o Dashboard, iniciar os processos Consumidor_Standard e Consumidor_FIFO e condicionar a disponibilização do Dashboard à verificação de inicialização bem-sucedida
     - _Requirements: 1.6, 8.1, 8.2, 10.1, 10.2_
   - [ ]* 18.2 Escrever teste de smoke de segurança (ausência de Access Keys)
     - Verificar ausência de `aws_access_key_id`/`aws_secret_access_key` em código, configuração e variáveis de ambiente e autenticação via IAM Role contra SQS/DynamoDB
     - _Requirements: 12.1, 12.2, 12.3_
 
-- [~] 19. Checkpoint — aplicação completa validada
+- [x] 19. Checkpoint — aplicação completa validada
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 20. Produzir os artefatos de documentação do projeto
-  - [~] 20.1 Escrever `ARQUITETURA.md`
+- [x] 20. Produzir os artefatos de documentação do projeto
+  - [x] 20.1 Escrever `ARQUITETURA.md`
     - Incluir visão geral, serviços AWS e suas funções, fluxos Standard/FIFO/falhas/DLQ, integração DynamoDB e Dashboard, lista de permissões IAM, ao menos um diagrama Mermaid de todos os fluxos e ao menos um diagrama com ícones oficiais AWS
     - _Requirements: 15.1, 15.2, 17.1, 17.6_
-  - [~] 20.2 Escrever `IMPLANTACAO.md`
+  - [x] 20.2 Escrever `IMPLANTACAO.md`
     - Passo a passo numerado em pt-BR para criar manualmente as 4 filas, a Tabela_Historico, a IAM_Role_EC2, a EC2 e os Security Groups, configurar o Session_Manager (porta 22 fechada), instalar/executar a aplicação (explicando cada comando), verificar pós-implantação, excluir recursos ao final e tratar falhas de etapa; incluir custo mensal estimado em USD e lista de exclusão
     - _Requirements: 15.3, 15.4, 15.5, 15.7, 16.1, 16.2, 16.3, 16.4, 16.5, 16.6, 16.7, 16.8, 16.9, 16.10, 17.2, 17.6_
-  - [~] 20.3 Escrever `README.md` (artigo técnico de portfólio)
+  - [x] 20.3 Escrever `README.md` (artigo técnico de portfólio)
     - Incluir, cada seção com ao menos um parágrafo: SQS, Standard vs FIFO, Visibility_Timeout, retenção, Long_Polling, MessageGroupId, deduplicação, DLQ, arquitetura, tecnologias, funcionamento, experimentos, resultados, boas práticas, lições aprendidas e conclusão; apenas resultados efetivamente obtidos
     - _Requirements: 17.3, 17.5, 17.6_
-  - [~] 20.4 Escrever `TESTES.md`
+  - [x] 20.4 Escrever `TESTES.md`
     - Roteiro dos seis testes (Standard; expiração de Visibility_Timeout; encaminhamento para DLQ; ordenação FIFO; concorrência ≥2; recuperação), cada um com os 8 campos obrigatórios (objetivo, pré-requisitos, configuração, passo a passo numerado, resultado esperado, evidências, resultado real e critério de aprovação)
     - _Requirements: 17.4, 17.5, 17.6, 18.1, 18.2, 18.3, 18.4, 18.5, 18.6, 18.7, 18.8_
 
-- [~] 21. Checkpoint final — artefatos e testes completos
+- [x] 21. Checkpoint final — artefatos e testes completos
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

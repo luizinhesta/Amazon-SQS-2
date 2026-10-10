@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Laboratório didático de Amazon SQS — Dashboard em português do Brasil"
+    />
+    <title>Laboratório Amazon SQS</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!--
+      Dashboard do Laboratório Amazon SQS (pt-BR).
+
+      Esta é a ESTRUTURA/esqueleto montado na Tarefa 17.1: a tela de login, a
+      navegação entre as cinco áreas e os containers vazios de cada área. O
+      conteúdo detalhado é preenchido pelas Tarefas 17.2 a 17.5, que devem usar os
+      "pontos de extensão" marcados com data-extension-point e os ids previsíveis
+      (overview-area, send-area, monitoring-area, history-area, lab-area).
+    -->
+
+    <!-- ============================================================= -->
+    <!-- Tela de login (Req. 12.5, 12.6)                                -->
+    <!-- ============================================================= -->
+    <main id="login-screen" class="login-screen" aria-labelledby="login-title">
+      <section class="login-card" role="dialog" aria-modal="true">
+        <h1 id="login-title" class="login-title">Laboratório Amazon SQS</h1>
+        <p class="login-subtitle">
+          Acesse o painel com seu usuário e senha. Após 5 tentativas inválidas
+          consecutivas, o acesso desta origem é bloqueado temporariamente.
+        </p>
+
+        <form id="login-form" class="login-form" novalidate>
+          <div class="field">
+            <label for="login-username">Usuário</label>
+            <input
+              id="login-username"
+              name="username"
+              type="text"
+              autocomplete="username"
+              required
+            />
+          </div>
+
+          <div class="field">
+            <label for="login-password">Senha</label>
+            <input
+              id="login-password"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              required
+            />
+          </div>
+
+          <button id="login-submit" type="submit" class="btn btn-primary">
+            Entrar
+          </button>
+
+          <!--
+            Área de feedback do login: mensagens de erro, tentativas restantes e
+            indicação de bloqueio por origem (Req. 12.6). Preenchida por auth.js.
+          -->
+          <p
+            id="login-feedback"
+            class="login-feedback"
+            role="alert"
+            aria-live="assertive"
+            hidden
+          ></p>
+
+          <!--
+            Indicação de bloqueio: exibida quando a origem está bloqueada, com a
+            contagem regressiva dos segundos restantes (Req. 12.6).
+          -->
+          <div id="login-lockout" class="login-lockout" role="status" aria-live="polite" hidden>
+            <span class="login-lockout-icon" aria-hidden="true">⛔</span>
+            <span id="login-lockout-text" class="login-lockout-text"></span>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <!-- ============================================================= -->
+    <!-- Painel autenticado: cabeçalho, navegação e as cinco áreas      -->
+    <!-- ============================================================= -->
+    <div id="dashboard" class="dashboard" hidden>
+      <header class="topbar">
+        <div class="topbar-brand">
+          <span class="topbar-logo" aria-hidden="true">📨</span>
+          <span class="topbar-title">Laboratório Amazon SQS</span>
+        </div>
+        <div class="topbar-meta">
+          <!--
+            Ponto de extensão: horário da última atualização bem-sucedida
+            (Tarefa 17.2 / 17.5 — Req. 3.10, 13.4).
+          -->
+          <span
+            id="last-update"
+            class="topbar-last-update"
+            data-extension-point="last-update"
+          ></span>
+          <button id="logout-button" type="button" class="btn btn-ghost">
+            Sair
+          </button>
+        </div>
+      </header>
+
+      <!-- Navegação entre as cinco áreas -->
+      <nav class="nav" aria-label="Áreas do laboratório">
+        <button class="nav-item is-active" type="button" data-area="overview">
+          Visão geral
+        </button>
+        <button class="nav-item" type="button" data-area="send">
+          Envio
+        </button>
+        <button class="nav-item" type="button" data-area="monitoring">
+          Monitoramento
+        </button>
+        <button class="nav-item" type="button" data-area="history">
+          Histórico detalhado
+        </button>
+        <button class="nav-item" type="button" data-area="lab">
+          Laboratório de falhas
+        </button>
+      </nav>
+
+      <!-- Faixa de status/erro global do Dashboard (ex.: dados desatualizados) -->
+      <div
+        id="global-status"
+        class="global-status"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></div>
+
+      <main class="content">
+        <!-- Área 1: Visão geral (Tarefa 17.2 — Req. 2.*, 3.*) -->
+        <section
+          id="overview-area"
+          class="area is-active"
+          data-area="overview"
+          data-extension-point="overview"
+          aria-labelledby="overview-heading"
+        >
+          <h2 id="overview-heading" class="area-title">Visão geral</h2>
+          <p class="area-placeholder">
+            Estatísticas por fluxo (Standard e FIFO) e os parâmetros de
+            Config_Aplicada e Config_Simulacao serão exibidos aqui.
+          </p>
+        </section>
+
+        <!-- Área 2: Envio de mensagens (Tarefa 17.3 — Req. 4.*) -->
+        <section
+          id="send-area"
+          class="area"
+          data-area="send"
+          data-extension-point="send"
+          aria-labelledby="send-heading"
+          hidden
+        >
+          <h2 id="send-heading" class="area-title">Envio de mensagens</h2>
+          <p class="area-placeholder">
+            Formulário de envio (fila, quantidade, order_id, tempo, cenário e
+            campos FIFO) com validação em pt-BR será montado aqui.
+          </p>
+        </section>
+
+        <!-- Área 3: Monitoramento (Tarefa 17.3 — Req. 5.*) -->
+        <section
+          id="monitoring-area"
+          class="area"
+          data-area="monitoring"
+          data-extension-point="monitoring"
+          aria-labelledby="monitoring-heading"
+          hidden
+        >
+          <h2 id="monitoring-heading" class="area-title">Monitoramento</h2>
+          <p class="area-placeholder">
+            Tabela de monitoramento (ID, Fila, Consumidor, Tentativas,
+            Processamento, Estado, Último evento, Ações) será montada aqui.
+          </p>
+        </section>
+
+        <!-- Área 4: Histórico detalhado (Tarefa 17.4 — Req. 6.*) -->
+        <section
+          id="history-area"
+          class="area"
+          data-area="history"
+          data-extension-point="history"
+          aria-labelledby="history-heading"
+          hidden
+        >
+          <h2 id="history-heading" class="area-title">Histórico detalhado</h2>
+          <p class="area-placeholder">
+            Linha do tempo cronológica com indicador Observado/Inferido por
+            evento será exibida aqui.
+          </p>
+        </section>
+
+        <!-- Área 5: Laboratório de falhas (Tarefa 17.4 — Req. 7.*, 10.7) -->
+        <section
+          id="lab-area"
+          class="area"
+          data-area="lab"
+          data-extension-point="lab"
+          aria-labelledby="lab-heading"
+          hidden
+        >
+          <h2 id="lab-heading" class="area-title">Laboratório de falhas</h2>
+          <p class="area-placeholder">
+            Painel de cenários de falha e comparação Standard × FIFO (e por
+            MessageGroupId) será montado aqui.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <!-- Módulos JS. Ordem: utilidades, API, áreas e, por fim, o orquestrador. -->
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>

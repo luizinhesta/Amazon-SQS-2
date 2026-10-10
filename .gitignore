@@ -1,20 +1,98 @@
+﻿# ==========================================================================
+# .gitignore — Laboratório Amazon SQS (Python/FastAPI + Dashboard HTML/CSS/JS)
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# Segurança: NUNCA versionar credenciais ou segredos
+# (o projeto usa IAM Role na EC2; mesmo assim, bloqueio preventivo)
+# --------------------------------------------------------------------------
+.env
+.env.*
+*.env
+.aws/
+aws.json
+credentials
+credentials.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.*
+*.secret
+
+# --------------------------------------------------------------------------
 # Python
+# --------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
 .eggs/
+*.egg
 build/
 dist/
+sdist/
+wheels/
+*.manifest
+*.spec
+
+# Ambientes virtuais
 .venv/
 venv/
 env/
+ENV/
+.python-version
 
-# Testes e cobertura
+# --------------------------------------------------------------------------
+# Testes, cobertura e type-checkers
+# --------------------------------------------------------------------------
 .pytest_cache/
 .hypothesis/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
 
-# IDE / SO
-.DS_Store
+# --------------------------------------------------------------------------
+# Frontend (web/) — caso venha a usar Node/ferramentas de build
+# --------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# --------------------------------------------------------------------------
+# Logs e artefatos de execução
+# --------------------------------------------------------------------------
+*.log
+logs/
+*.pid
+*.tmp
+tmp/
+
+# --------------------------------------------------------------------------
+# IDE / Editores
+# --------------------------------------------------------------------------
+.vscode/
+.idea/
 *.swp
+*.swo
+*~
+
+# --------------------------------------------------------------------------
+# Sistema operacional
+# --------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --------------------------------------------------------------------------
+# Observação: a pasta .kiro/ (specs do projeto) É versionada
+# intencionalmente e NÃO deve ser ignorada.
+# --------------------------------------------------------------------------
