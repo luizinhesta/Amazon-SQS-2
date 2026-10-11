@@ -57,7 +57,7 @@ def _verificador_tabela_ok() -> MagicMock:
 
 
 class _GerenciadorFalso:
-    """Dublê do GerenciadorConsumidores: registra iniciar/parar sem threads reais."""
+    """Dublê de gerenciador (consumidores/monitor): registra iniciar/parar sem threads."""
 
     def __init__(self) -> None:
         self.iniciado = 0
@@ -99,13 +99,21 @@ def test_dashboard_servido_quando_verificacao_ok() -> None:
 
 def test_consumidores_iniciam_e_param_no_ciclo_de_vida_quando_ok() -> None:
     gerenciador = _GerenciadorFalso()
-    app = _compor(fabrica_gerenciador=lambda g, h, e: gerenciador)
+    monitor = _GerenciadorFalso()
+    app = _compor(
+        fabrica_gerenciador=lambda g, h, e: gerenciador,
+        fabrica_monitor_dlq=lambda g, h: monitor,
+    )
 
     # Startup/shutdown são disparados pelo context manager do TestClient.
     with TestClient(app):
         assert gerenciador.iniciado == 1
         assert gerenciador.parado == 0
+        # O monitor de DLQ segue o mesmo ciclo de vida dos consumidores.
+        assert monitor.iniciado == 1
+        assert monitor.parado == 0
     assert gerenciador.parado == 1
+    assert monitor.parado == 1
 
 
 # --- Verificação falha: Dashboard indisponível + consumidores NÃO iniciados ---

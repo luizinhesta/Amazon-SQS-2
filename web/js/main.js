@@ -112,9 +112,37 @@ function iniciarPainel() {
 
   // Atualização periódica (Tarefa 17.5): a cada tick, busca estatísticas e
   // monitoramento. As áreas renderizam os dados; aqui apenas disparamos a busca.
+  //
+  // Resiliência a falha parcial: usamos Promise.allSettled em vez de Promise.all
+  // para que a lentidão ou falha de UMA das chamadas não derrube o tick inteiro.
+  // Regra de sucesso/falha da faixa "Não foi possível atualizar os dados":
+  //  - O tick é SUCESSO quando pelo menos uma das duas chamadas responde com
+  //    status HTTP ok (resolve). Isso vale INCLUSIVE quando o corpo traz
+  //    `timeout: true`, pois o timeout do cálculo é transitório (HTTP 200), não
+  //    uma falha real de conexão — as áreas (overview/monitoring) já tratam esse
+  //    caso individualmente, preservando os últimos dados válidos.
+  //  - O tick só é FALHA (lança erro, fazendo o refresh exibir a faixa) quando
+  //    AMBAS as chamadas rejeitarem por erro REAL de rede/HTTP (fetch falhou ou
+  //    status não-ok, que o cliente converte em ApiError).
   const refresh = createRefreshController({
     onTick: async () => {
-      await Promise.all([api.obterEstatisticas(), api.obterMonitoramento()]);
+      const resultados = await Promise.allSettled([
+        api.obterEstatisticas(),
+        api.obterMonitoramento(),
+      ]);
+
+      // Sucesso quando ao menos uma chamada resolveu (resposta HTTP ok). Uma
+      // resposta 200 com `timeout: true` conta como resolvida (não é erro real).
+      const algumaOk = resultados.some((r) => r.status === "fulfilled");
+      if (algumaOk) {
+        return;
+      }
+
+      // Ambas rejeitaram: falha real de rede/HTTP. Propaga o erro para o refresh
+      // marcar a faixa de dados desatualizados.
+      const primeiraFalha = resultados.find((r) => r.status === "rejected");
+      throw (primeiraFalha && primeiraFalha.reason) ||
+        new Error("Falha ao atualizar estatísticas e monitoramento.");
     },
   });
   refresh.start();

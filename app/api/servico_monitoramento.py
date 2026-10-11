@@ -23,7 +23,7 @@ Decisões de design relevantes:
   monitoramento devolve ``vazio=True`` e uma mensagem em pt-BR (Req. 5.8).
 - **Timeout determinístico e injetável (Req. 14.1-14.4).** O cálculo pesado roda
   dentro de :func:`executar_com_timeout`, que aplica um limite de tempo
-  configurável (padrão 3 s). Ao exceder, devolve uma indicação clara de timeout
+  configurável (padrão 10 s). Ao exceder, devolve uma indicação clara de timeout
   (campo booleano + mensagem pt-BR) em vez de erro bruto — o Dashboard preserva os
   últimos dados válidos. O limite e o executor são injetáveis, de modo que os
   testes forcem o caminho de timeout sem esperar 3 s reais (basta injetar um
@@ -65,7 +65,13 @@ from app.dominio.tipos import EventType
 # Limite de tempo padrão (em segundos) dos endpoints de estatísticas/monitoramento
 # (Req. 14.1, 14.2). Mantido como constante local do serviço; os endpoints o aceitam
 # como parâmetro injetável para permitir que os testes forcem o timeout rapidamente.
-TIMEOUT_PADRAO_SEGUNDOS: float = 3.0
+#
+# Elevado de 3 s para 10 s por ser mais tolerante ao laboratório: quando há
+# processamento concorrente (consumidores + monitor de DLQ + múltiplas consultas ao
+# histórico), o cálculo pode passar de 3 s e disparar timeouts espúrios que apareciam
+# ao usuário como falha de atualização. Os testes continuam injetando um
+# `timeout_segundos` pequeno explicitamente, portanto não dependem deste valor.
+TIMEOUT_PADRAO_SEGUNDOS: float = 10.0
 
 # Filas principais consultadas para montar estatísticas/monitoramento. As DLQs são
 # contabilizadas no mesmo fluxo da fila principal pelo prefixo (ver
@@ -217,7 +223,7 @@ def obter_estatisticas(
 ) -> RespostaEstatisticas:
     """Monta a resposta de ``GET /api/estatisticas`` com timeout (Req. 3, 14.1, 14.3).
 
-    O cálculo roda sob um limite de tempo configurável (padrão 3 s). Ao exceder,
+    O cálculo roda sob um limite de tempo configurável (padrão 10 s). Ao exceder,
     devolve uma :class:`RespostaEstatisticas` com ``timeout=True`` e mensagem em
     pt-BR, sem levantar erro bruto; o Dashboard preserva os últimos dados válidos.
 
@@ -387,7 +393,7 @@ def obter_monitoramento(
 ) -> RespostaMonitoramento:
     """Monta a resposta de ``GET /api/monitoramento`` com timeout (Req. 5, 14.2, 14.4).
 
-    O cálculo roda sob um limite de tempo configurável (padrão 3 s). Ao exceder,
+    O cálculo roda sob um limite de tempo configurável (padrão 10 s). Ao exceder,
     devolve uma :class:`RespostaMonitoramento` com ``timeout=True`` e mensagem em
     pt-BR, sem levantar erro bruto; o Dashboard preserva os últimos dados válidos.
 

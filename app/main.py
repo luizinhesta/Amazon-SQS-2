@@ -70,6 +70,7 @@ from app.consumidores.consumidor_standard import (
     criar_consumidor_standard,
     gerar_consumer_id,
 )
+from app.consumidores.monitor_dlq import GerenciadorMonitorDlq, MonitorDlq
 from app.dominio import constantes as c
 from app.seguranca.autenticacao import ControladorAutenticacao
 from app.verificacao_inicializacao import (
@@ -336,6 +337,9 @@ def compor_aplicacao(
     fabrica_gerenciador: Optional[
         Callable[[SqsGateway, HistoricoRepository, EstadoInstanciasConsumidores], GerenciadorConsumidores]
     ] = None,
+    fabrica_monitor_dlq: Optional[
+        Callable[[SqsGateway, HistoricoRepository], GerenciadorMonitorDlq]
+    ] = None,
     **kwargs: Any,
 ) -> FastAPI:
     """Compõe a aplicação completa da EC2 (API + Dashboard + consumidores).
@@ -363,6 +367,11 @@ def compor_aplicacao(
             querem threads vivas). O Dashboard continua sendo servido.
         fabrica_gerenciador: Fábrica opcional do :class:`GerenciadorConsumidores`
             (injetável nos testes). Por padrão, usa a implementação real.
+        fabrica_monitor_dlq: Fábrica opcional do :class:`GerenciadorMonitorDlq`
+            (injetável nos testes). Por padrão, usa a implementação real. O monitor
+            de DLQ só é iniciado quando a verificação tem sucesso e
+            ``iniciar_consumidores`` é ``True``, seguindo a mesma condição dos
+            consumidores.
         **kwargs: Repassados a ``create_app`` (ex.: ``estado_simulacao``,
             ``controlador_autenticacao``, ``credenciais_dashboard``,
             ``cliente_dynamodb``).
@@ -409,13 +418,16 @@ def compor_aplicacao(
     )
     app.state.resultado_verificacao = resultado
     app.state.gerenciador_consumidores = None
+    app.state.gerenciador_monitor_dlq = None
 
     if not resultado.sucesso:
-        # Passo 3b: verificação falhou — Dashboard indisponível, sem consumidores.
+        # Passo 3b: verificação falhou — Dashboard indisponível, sem consumidores
+        # nem monitor de DLQ (todos dependem dos mesmos recursos AWS).
         _montar_dashboard_indisponivel(app, resultado)
         return app
 
-    # Passo 3a: verificação bem-sucedida — serve o Dashboard e inicia os consumidores.
+    # Passo 3a: verificação bem-sucedida — serve o Dashboard e inicia os consumidores
+    # e o monitor de DLQ (ambos condicionados à verificação OK).
     if iniciar_consumidores:
         criar = fabrica_gerenciador or (
             lambda g, h, e: GerenciadorConsumidores(
@@ -425,13 +437,26 @@ def compor_aplicacao(
         gerenciador = criar(gateway_efetivo, historico_efetivo, estado_instancias)
         app.state.gerenciador_consumidores = gerenciador
 
+        # Monitor de DLQ: observa as DLQs e registra `encaminhada_dlq` (OBSERVADO)
+        # de forma idempotente, para que Histórico e Monitoramento reflitam o
+        # encaminhamento (Req. 6.6, 7.9, 7.10).
+        criar_monitor = fabrica_monitor_dlq or (
+            lambda g, h: GerenciadorMonitorDlq(
+                monitor=MonitorDlq(sqs=g, historico=h)
+            )
+        )
+        gerenciador_monitor = criar_monitor(gateway_efetivo, historico_efetivo)
+        app.state.gerenciador_monitor_dlq = gerenciador_monitor
+
         @app.on_event("startup")
-        def _iniciar_consumidores() -> None:
+        def _iniciar_processos_fundo() -> None:
             gerenciador.iniciar()
+            gerenciador_monitor.iniciar()
 
         @app.on_event("shutdown")
-        def _parar_consumidores() -> None:
+        def _parar_processos_fundo() -> None:
             gerenciador.parar()
+            gerenciador_monitor.parar()
 
     # O mount dos estáticos vem por último, para a API ter precedência sobre ``/``.
     _montar_dashboard_disponivel(app, diretorio_dashboard)
