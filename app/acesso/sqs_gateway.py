@@ -50,6 +50,56 @@ WAIT_TIME_SECONDS_MAX: int = 20
 MAX_NUMBER_OF_MESSAGES_MIN: int = 1
 MAX_NUMBER_OF_MESSAGES_MAX: int = 10
 
+# ---------------------------------------------------------------------------
+# Classificação de erros do DeleteMessage (helpers puros)
+# ---------------------------------------------------------------------------
+# Estes helpers NÃO capturam nada no gateway: o ``delete_message`` continua
+# repassando o erro bruto da AWS (contrato documentado). Eles apenas permitem
+# que a camada de processamento classifique o erro e decida como tratá-lo
+# (registrar ``exclusao_nao_confirmada`` em vez de deixar a thread morrer).
+#
+# Códigos de erro do botocore que indicam um ReceiptHandle expirado/inválido no
+# DeleteMessage. ``ReceiptHandleIsInvalid`` sempre indica handle inválido;
+# ``InvalidParameterValue`` só é tratado como expiração quando a mensagem de erro
+# da AWS contém "receipt handle has expired" (para não mascarar outros usos).
+RECEIPT_HANDLE_EXPIRADO_CODES: frozenset[str] = frozenset(
+    {"InvalidParameterValue", "ReceiptHandleIsInvalid"}
+)
+
+
+def e_receipt_handle_expirado(erro: BaseException) -> bool:
+    """Indica se o erro do botocore é um ReceiptHandle expirado/inválido.
+
+    Lê de forma estrutural ``erro.response["Error"]["Code"]`` e ``["Message"]``,
+    sem importar ``botocore`` no topo do módulo (mesmo padrão de
+    ``historico_repository._e_erro_transitorio``). Retorna ``True`` para
+    ``ReceiptHandleIsInvalid`` e, para ``InvalidParameterValue``, somente quando a
+    mensagem de erro contém "receipt handle has expired".
+    """
+    resposta = getattr(erro, "response", None)
+    if not isinstance(resposta, dict):
+        return False
+    erro_dict = resposta.get("Error", {}) or {}
+    codigo = erro_dict.get("Code")
+    mensagem = (erro_dict.get("Message", "") or "").lower()
+    if codigo == "ReceiptHandleIsInvalid":
+        return True
+    return codigo == "InvalidParameterValue" and "receipt handle has expired" in mensagem
+
+
+def e_erro_infra_sqs(erro: BaseException) -> bool:
+    """Indica se o erro é de infraestrutura da AWS/botocore (ClientError/BotoCoreError).
+
+    Classifica por estrutura/MRO — se o erro expõe ``.response`` (próprio de
+    ``ClientError``) ou se ``BotoCoreError``/``ClientError`` consta no MRO do tipo —
+    seguindo o padrão de ``historico_repository._e_erro_transitorio`` para não
+    importar ``botocore`` em tempo de módulo (mantém os testes com *fakes*).
+    """
+    if getattr(erro, "response", None) is not None:
+        return True
+    nomes_das_bases = {base.__name__ for base in type(erro).__mro__}
+    return "BotoCoreError" in nomes_das_bases or "ClientError" in nomes_das_bases
+
 
 @dataclass(frozen=True)
 class MensagemRecebida:
@@ -240,6 +290,35 @@ class SqsGateway:
         """
         url = self.obter_url_fila(nome_fila)
         return self._sqs.delete_message(QueueUrl=url, ReceiptHandle=receipt_handle)
+
+    # ------------------------------------------------------------------
+    # Extensão do Visibility_Timeout de uma mensagem recebida
+    # ------------------------------------------------------------------
+    def change_message_visibility(
+        self,
+        nome_fila: str,
+        receipt_handle: str,
+        visibility_timeout: int,
+    ) -> Mapping[str, Any]:
+        """Ajusta o Visibility_Timeout de UMA mensagem recebida (ChangeMessageVisibility).
+
+        Permite estender (ou reduzir) o tempo de invisibilidade da mensagem
+        associada ao ``receipt_handle``, por exemplo para evitar a reentrega
+        durante um processamento longo (opção opt-in da frente C). **NÃO** altera o
+        atributo ``VisibilityTimeout`` da fila — os 30s configurados no Console AWS
+        permanecem intactos; o ajuste vale apenas para esta mensagem.
+
+        Este método é um *passthrough* puro: a validação de faixa do
+        ``visibility_timeout`` é responsabilidade do chamador
+        (``processamento.processar_mensagem``), não do gateway. O erro original da
+        AWS é repassado sem encapsulamento.
+        """
+        url = self.obter_url_fila(nome_fila)
+        return self._sqs.change_message_visibility(
+            QueueUrl=url,
+            ReceiptHandle=receipt_handle,
+            VisibilityTimeout=visibility_timeout,
+        )
 
     # ------------------------------------------------------------------
     # Atributos de fila

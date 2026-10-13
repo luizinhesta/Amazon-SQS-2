@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from app.acesso.historico_repository import FalhaRegistroEvento
 from app.acesso.sqs_gateway import MensagemRecebida
 from app.consumidores.processamento import (
     CENARIOS_DE_SUCESSO,
@@ -26,7 +27,9 @@ from app.consumidores.processamento import (
     ErroProcessamentoSimulado,
     InterrupcaoProcessamento,
     processar_mensagem,
+    validar_extensao_visibility,
 )
+from app.dominio.constantes import HEARTBEAT_VISIBILITY_SEGUNDOS
 from app.dominio.evento import Evento
 from app.dominio.tipos import EventSource, EventType
 
@@ -50,17 +53,52 @@ class HistoricoFake:
 
 
 class SqsFake:
-    """Fake de SqsGateway que registra as chamadas de ``delete_message``."""
+    """Fake de SqsGateway que registra as chamadas de ``delete_message``.
 
-    def __init__(self, erro_ao_excluir: Exception | None = None) -> None:
+    ``erro_ao_excluir`` força o ``delete_message`` a sempre levantar o erro dado.
+    ``erros_change_visibility`` permite simular falhas de
+    ``change_message_visibility`` (frente C): cada chamada consome um item; um
+    item ``None`` indica sucesso e qualquer exceção é levantada.
+    """
+
+    def __init__(
+        self,
+        erro_ao_excluir: Exception | None = None,
+        erros_change_visibility: list[Exception | None] | None = None,
+    ) -> None:
         self.exclusoes: list[tuple[str, str]] = []
         self._erro_ao_excluir = erro_ao_excluir
+        self.mudancas_visibility: list[tuple[str, str, int]] = []
+        self._erros_change_visibility = list(erros_change_visibility or [])
 
     def delete_message(self, nome_fila: str, receipt_handle: str) -> dict[str, Any]:
         if self._erro_ao_excluir is not None:
             raise self._erro_ao_excluir
         self.exclusoes.append((nome_fila, receipt_handle))
         return {}
+
+    def change_message_visibility(
+        self, nome_fila: str, receipt_handle: str, visibility_timeout: int
+    ) -> dict[str, Any]:
+        self.mudancas_visibility.append(
+            (nome_fila, receipt_handle, visibility_timeout)
+        )
+        if self._erros_change_visibility:
+            erro = self._erros_change_visibility.pop(0)
+            if erro is not None:
+                raise erro
+        return {}
+
+
+def _client_error(codigo: str, mensagem: str = "") -> Exception:
+    """Cria uma exceção que imita um botocore.ClientError (com ``.response``)."""
+
+    class _ClientErrorSimulado(Exception):
+        pass
+
+    erro = _ClientErrorSimulado(mensagem or codigo)
+    erro.response = {"Error": {"Code": codigo, "Message": mensagem}}  # type: ignore[attr-defined]
+    return erro
 
 
 class SleepFake:
@@ -273,11 +311,210 @@ def test_message_group_id_da_mensagem_e_propagado() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_erro_no_delete_message_propaga_erro_original() -> None:
-    # Req. 8.8: falha de infraestrutura (não cenário simulado) propaga o erro.
+def test_erro_no_delete_message_nao_reconhecido_propaga() -> None:
+    # Erro NÃO reconhecido como infra (sem .response, fora do MRO) é re-levantado
+    # para a guarda por iteração do consumidor (frente B).
     class ErroAwsSimulado(Exception):
         pass
 
     sqs = SqsFake(erro_ao_excluir=ErroAwsSimulado("DeleteMessage falhou"))
     with pytest.raises(ErroAwsSimulado):
         _processar(cenario=CenarioFalha.SUCESSO, sqs=sqs)
+
+
+# ---------------------------------------------------------------------------
+# FEAT-002: DeleteMessage falho por ReceiptHandle expirado / erro de infra
+# ---------------------------------------------------------------------------
+
+
+def test_delete_receipt_handle_expirado_registra_exclusao_nao_confirmada() -> None:
+    # Núcleo da correção: delete falha por ReceiptHandle expirado -> não levanta,
+    # grava exatamente um evento exclusao_nao_confirmada, sem processada/excluida.
+    erro = _client_error("InvalidParameterValue", "The receipt handle has expired.")
+    sqs = SqsFake(erro_ao_excluir=erro)
+    resultado, sqs, historico, _ = _processar(
+        cenario=CenarioFalha.SUCESSO, sqs=sqs
+    )
+
+    assert resultado.sucesso is False
+    assert resultado.excluida is False
+    assert resultado.exclusao_nao_confirmada is True
+    assert resultado.erro_detalhe is not None
+    assert "receipt handle has expired" in resultado.erro_detalhe.lower()
+    assert sqs.exclusoes == []  # a mensagem permanece na fila
+
+    tipos = historico.tipos()
+    assert tipos == [
+        EventType.RECEBIDA,
+        EventType.PROCESSAMENTO_INICIADO,
+        EventType.EXCLUSAO_NAO_CONFIRMADA,
+    ]
+    assert EventType.PROCESSADA not in tipos
+    assert EventType.EXCLUIDA not in tipos
+    assert EventType.FALHA not in tipos
+    evento = next(
+        e for e in historico.eventos
+        if e.event_type is EventType.EXCLUSAO_NAO_CONFIRMADA
+    )
+    assert evento.event_source is EventSource.OBSERVADO
+    assert evento.error_detail is not None
+
+
+def test_delete_erro_infra_generico_vira_exclusao_nao_confirmada() -> None:
+    # Qualquer ClientError (com .response) reconhecido como infra também vira
+    # exclusao_nao_confirmada, sem matar o consumidor.
+    sqs = SqsFake(erro_ao_excluir=_client_error("ServiceUnavailable"))
+    resultado, sqs, historico, _ = _processar(
+        cenario=CenarioFalha.SUCESSO, sqs=sqs
+    )
+    assert resultado.exclusao_nao_confirmada is True
+    assert resultado.sucesso is False
+    assert EventType.EXCLUSAO_NAO_CONFIRMADA in historico.tipos()
+
+
+def test_sucesso_ordem_eventos_processada_apos_delete() -> None:
+    # No caminho de sucesso a ordem passa a ser recebida, processamento_iniciado,
+    # processada, excluida (processada registrada APÓS o delete confirmado).
+    sqs = SqsFake()
+    resultado, sqs, historico, _ = _processar(cenario=CenarioFalha.SUCESSO, sqs=sqs)
+    assert resultado.sucesso is True
+    assert sqs.exclusoes == [("lab-sqs-standard", "rh-001")]
+    assert historico.tipos() == [
+        EventType.RECEBIDA,
+        EventType.PROCESSAMENTO_INICIADO,
+        EventType.PROCESSADA,
+        EventType.EXCLUIDA,
+    ]
+
+
+# ---------------------------------------------------------------------------
+# FEAT-002: janela crítica pós-delete (histórico falha após delete confirmado)
+# ---------------------------------------------------------------------------
+
+
+class HistoricoFalhaPosDelete(HistoricoFake):
+    """HistoricoFake que falha ao registrar o evento ``processada``."""
+
+    def registrar_evento(self, evento: Evento) -> None:
+        if evento.event_type is EventType.PROCESSADA:
+            raise FalhaRegistroEvento(evento, 3, RuntimeError("DynamoDB indisponível"))
+        super().registrar_evento(evento)
+
+
+def test_historico_pos_delete_falhou_retorna_sucesso_sem_propagar(caplog) -> None:
+    # Delete sucede, mas registrar_evento(processada) lança: loga
+    # historico_pos_delete_falhou e retorna sucesso=True/excluida=True sem propagar.
+    import logging
+
+    sqs = SqsFake()
+    historico = HistoricoFalhaPosDelete()
+    with caplog.at_level(logging.ERROR, logger="sqs_lab.resiliencia"):
+        resultado, sqs, _, _ = _processar(
+            cenario=CenarioFalha.SUCESSO, sqs=sqs, historico=historico
+        )
+    # O delete de fato ocorreu: o resultado reflete a realidade do SQS.
+    assert resultado.sucesso is True
+    assert resultado.excluida is True
+    assert sqs.exclusoes == [("lab-sqs-standard", "rh-001")]
+    assert any("historico_pos_delete_falhou" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# FEAT-002 frente C: validação da extensão opt-in de Visibility_Timeout
+# ---------------------------------------------------------------------------
+
+
+def test_validar_extensao_desligada_retorna_none() -> None:
+    assert validar_extensao_visibility(False, None) is None
+    # Mesmo com valor presente, desligada não valida nem usa.
+    assert validar_extensao_visibility(False, 9999) is None
+
+
+def test_validar_extensao_ligada_sem_valor_levanta() -> None:
+    with pytest.raises(ValueError):
+        validar_extensao_visibility(True, None)
+
+
+@pytest.mark.parametrize(
+    "valor", [HEARTBEAT_VISIBILITY_SEGUNDOS - 1, 43200 + 1, 0, -5]
+)
+def test_validar_extensao_fora_da_faixa_levanta(valor: int) -> None:
+    with pytest.raises(ValueError):
+        validar_extensao_visibility(True, valor)
+
+
+@pytest.mark.parametrize("valor", [HEARTBEAT_VISIBILITY_SEGUNDOS, 60, 43200])
+def test_validar_extensao_dentro_da_faixa_ok(valor: int) -> None:
+    assert validar_extensao_visibility(True, valor) == valor
+
+
+def test_extensao_ligada_sucesso_renova_visibility_em_fatias() -> None:
+    # Com a flag ligada e cenário SUCESSO, o sleep ocorre em fatias e renova o
+    # Visibility entre elas via change_message_visibility.
+    sqs = SqsFake()
+    sleep = SleepFake()
+    resultado, sqs, _, sleep = _processar(
+        cenario=CenarioFalha.SUCESSO,
+        processing_seconds=50,
+        sqs=sqs,
+        sleep=sleep,
+        estender_visibility=True,
+        visibility_timeout_estendido=60,
+    )
+    assert resultado.sucesso is True
+    # 50s em fatias de 20 => 20, 20, 10
+    assert sleep.chamadas == [20, 20, 10]
+    # Renova entre as fatias (duas renovações para três fatias).
+    assert sqs.mudancas_visibility == [
+        ("lab-sqs-standard", "rh-001", 60),
+        ("lab-sqs-standard", "rh-001", 60),
+    ]
+
+
+def test_extensao_desligada_preserva_sleep_unico() -> None:
+    # Comportamento atual preservado com a flag desligada (default).
+    sqs = SqsFake()
+    sleep = SleepFake()
+    _processar(
+        cenario=CenarioFalha.SUCESSO, processing_seconds=45, sqs=sqs, sleep=sleep
+    )
+    assert sleep.chamadas == [45]
+    assert sqs.mudancas_visibility == []
+
+
+def test_extensao_falha_change_visibility_loga_e_continua(caplog) -> None:
+    import logging
+
+    sqs = SqsFake(erros_change_visibility=[_client_error("ServiceUnavailable")])
+    sleep = SleepFake()
+    with caplog.at_level(logging.WARNING, logger="sqs_lab.resiliencia"):
+        resultado, sqs, _, sleep = _processar(
+            cenario=CenarioFalha.SUCESSO,
+            processing_seconds=50,
+            sqs=sqs,
+            sleep=sleep,
+            estender_visibility=True,
+            visibility_timeout_estendido=60,
+        )
+    # Falha de renovação não aborta: o processamento segue e conclui com sucesso.
+    assert resultado.sucesso is True
+    assert any(
+        "change_message_visibility_falhou" in r.message for r in caplog.records
+    )
+
+
+def test_extensao_ignorada_no_cenario_duracao_superior_visibility() -> None:
+    # O cenário didático DURACAO_SUPERIOR_VISIBILITY ignora a extensão: sleep único,
+    # sem renovar (deixa expirar de propósito).
+    sqs = SqsFake()
+    sleep = SleepFake()
+    _processar(
+        cenario=CenarioFalha.DURACAO_SUPERIOR_VISIBILITY,
+        processing_seconds=45,
+        sqs=sqs,
+        sleep=sleep,
+        estender_visibility=True,
+        visibility_timeout_estendido=60,
+    )
+    assert sleep.chamadas == [45]
+    assert sqs.mudancas_visibility == []

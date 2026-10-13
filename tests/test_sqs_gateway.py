@@ -31,6 +31,8 @@ from app.acesso.sqs_gateway import (
     WAIT_TIME_SECONDS_MIN,
     MensagemRecebida,
     SqsGateway,
+    e_erro_infra_sqs,
+    e_receipt_handle_expirado,
 )
 from app.dominio import constantes as c
 
@@ -247,6 +249,87 @@ def test_delete_message_repassa_erro_original_da_aws() -> None:
     gw = SqsGateway(cliente_sqs=cliente)
     with pytest.raises(_ErroAwsSimulado, match="falha no DeleteMessage"):
         gw.delete_message(c.FILA_STANDARD, "rh")
+
+
+# --- Extensão do Visibility_Timeout (ChangeMessageVisibility) ----------------
+
+
+def test_change_message_visibility_passa_parametros() -> None:
+    cliente = _cliente_simulado()
+    cliente.change_message_visibility.return_value = {}
+    gw = SqsGateway(cliente_sqs=cliente)
+
+    gw.change_message_visibility(c.FILA_FIFO, "rh-abc", 60)
+
+    kwargs = cliente.change_message_visibility.call_args.kwargs
+    assert kwargs["ReceiptHandle"] == "rh-abc"
+    assert kwargs["VisibilityTimeout"] == 60
+    assert kwargs["QueueUrl"].endswith("lab-sqs-standard")
+
+
+def test_change_message_visibility_repassa_erro_original_da_aws() -> None:
+    cliente = _cliente_simulado()
+    cliente.change_message_visibility.side_effect = _ErroAwsSimulado(
+        "falha no ChangeMessageVisibility"
+    )
+    gw = SqsGateway(cliente_sqs=cliente)
+    with pytest.raises(_ErroAwsSimulado, match="falha no ChangeMessageVisibility"):
+        gw.change_message_visibility(c.FILA_FIFO, "rh", 60)
+
+
+# --- Classificadores de erro do DeleteMessage (helpers puros) ----------------
+
+
+def _client_error(codigo: str, mensagem: str = "") -> Exception:
+    """Cria uma exceção que imita um botocore.ClientError (com ``.response``)."""
+
+    class _ClientErrorSimulado(Exception):
+        pass
+
+    erro = _ClientErrorSimulado(mensagem or codigo)
+    erro.response = {"Error": {"Code": codigo, "Message": mensagem}}  # type: ignore[attr-defined]
+    return erro
+
+
+def test_e_receipt_handle_expirado_para_invalid_parameter_value_com_mensagem() -> None:
+    erro = _client_error(
+        "InvalidParameterValue", "The receipt handle has expired."
+    )
+    assert e_receipt_handle_expirado(erro) is True
+
+
+def test_e_receipt_handle_expirado_para_receipt_handle_is_invalid() -> None:
+    erro = _client_error("ReceiptHandleIsInvalid", "qualquer mensagem")
+    assert e_receipt_handle_expirado(erro) is True
+
+
+def test_e_receipt_handle_expirado_falso_para_invalid_parameter_sem_mensagem() -> None:
+    # InvalidParameterValue sem "receipt handle has expired" NÃO deve ser tratado
+    # como expiração (para não mascarar outros usos do código).
+    erro = _client_error("InvalidParameterValue", "Outro problema de parâmetro.")
+    assert e_receipt_handle_expirado(erro) is False
+
+
+def test_e_receipt_handle_expirado_falso_sem_response() -> None:
+    assert e_receipt_handle_expirado(_ErroAwsSimulado("sem response")) is False
+
+
+def test_e_erro_infra_sqs_true_quando_tem_response() -> None:
+    assert e_erro_infra_sqs(_client_error("ServiceUnavailable")) is True
+
+
+def test_e_erro_infra_sqs_true_por_mro() -> None:
+    class BotoCoreError(Exception):
+        pass
+
+    class EndpointConnectionError(BotoCoreError):
+        pass
+
+    assert e_erro_infra_sqs(EndpointConnectionError("timeout")) is True
+
+
+def test_e_erro_infra_sqs_falso_para_erro_generico() -> None:
+    assert e_erro_infra_sqs(ValueError("erro de domínio")) is False
 
 
 # --- Atributos de fila -------------------------------------------------------
