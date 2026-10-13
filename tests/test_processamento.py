@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 
 from app.acesso.historico_repository import FalhaRegistroEvento
 from app.acesso.sqs_gateway import MensagemRecebida
@@ -52,10 +53,32 @@ class HistoricoFake:
         return [e.event_type for e in self.eventos]
 
 
+# Objeto de erro padrão no formato botocore real (ClientError com ``.response``),
+# para exercitar de verdade os classificadores ``e_receipt_handle_expirado`` e
+# ``e_erro_infra_sqs``. ``botocore`` já é dependência do projeto (via boto3), então
+# importar ``ClientError`` nos testes não adiciona dependência nova. Representa o
+# erro real observado no laboratório: DeleteMessage com ReceiptHandle expirado.
+ERRO_HANDLE_EXPIRADO = ClientError(
+    {
+        "Error": {
+            "Code": "InvalidParameterValue",
+            "Message": "The receipt handle has expired.",
+        }
+    },
+    "DeleteMessage",
+)
+
+
 class SqsFake:
     """Fake de SqsGateway que registra as chamadas de ``delete_message``.
 
     ``erro_ao_excluir`` força o ``delete_message`` a sempre levantar o erro dado.
+    ``efeitos_delete`` permite programar o desfecho **por chamada**: cada
+    ``delete_message`` consome o próximo item em ordem; se for uma ``Exception``,
+    ela é levantada; se for ``None``, a exclusão é registrada e retorna ``{}``.
+    Esgotada a lista, prevalece o comportamento padrão (sucesso). ``erro_ao_excluir``
+    e ``efeitos_delete`` são mutuamente exclusivos; se ambos vierem,
+    ``efeitos_delete`` tem precedência.
     ``erros_change_visibility`` permite simular falhas de
     ``change_message_visibility`` (frente C): cada chamada consome um item; um
     item ``None`` indica sucesso e qualquer exceção é levantada.
@@ -65,13 +88,23 @@ class SqsFake:
         self,
         erro_ao_excluir: Exception | None = None,
         erros_change_visibility: list[Exception | None] | None = None,
+        efeitos_delete: list[Exception | None] | None = None,
     ) -> None:
         self.exclusoes: list[tuple[str, str]] = []
         self._erro_ao_excluir = erro_ao_excluir
+        self._efeitos_delete = list(efeitos_delete) if efeitos_delete else None
         self.mudancas_visibility: list[tuple[str, str, int]] = []
         self._erros_change_visibility = list(erros_change_visibility or [])
 
     def delete_message(self, nome_fila: str, receipt_handle: str) -> dict[str, Any]:
+        # ``efeitos_delete`` (desfecho por chamada) tem precedência sobre
+        # ``erro_ao_excluir`` (lança sempre).
+        if self._efeitos_delete is not None and self._efeitos_delete:
+            efeito = self._efeitos_delete.pop(0)
+            if efeito is not None:
+                raise efeito
+            self.exclusoes.append((nome_fila, receipt_handle))
+            return {}
         if self._erro_ao_excluir is not None:
             raise self._erro_ao_excluir
         self.exclusoes.append((nome_fila, receipt_handle))
@@ -307,13 +340,37 @@ def test_message_group_id_da_mensagem_e_propagado() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Falha de infraestrutura no DeleteMessage: erro original é propagado
+# FEAT-006 / Teste 3: substituição do antigo
+# ``test_erro_no_delete_message_propaga_erro_original`` por DOIS testes nomeados
+# sem ambiguidade. A nova regra: infra RECONHECIDA (ClientError/ReceiptHandle) NÃO
+# propaga (vira ``exclusao_nao_confirmada``); erro inesperado (sem ``.response`` e
+# fora do MRO de ClientError/BotoCoreError) é re-levantado para a guarda da frente B.
 # ---------------------------------------------------------------------------
 
 
-def test_erro_no_delete_message_nao_reconhecido_propaga() -> None:
+def test_delete_infra_reconhecida_vira_exclusao_nao_confirmada() -> None:
+    # Infra reconhecida (ReceiptHandle expirado via botocore ClientError): não
+    # propaga; grava exclusao_nao_confirmada; sucesso=False, excluida=False,
+    # exclusao_nao_confirmada=True; sem processada/excluida.
+    sqs = SqsFake(erro_ao_excluir=ERRO_HANDLE_EXPIRADO)
+    resultado, sqs, historico, _ = _processar(cenario=CenarioFalha.SUCESSO, sqs=sqs)
+
+    assert resultado.sucesso is False
+    assert resultado.excluida is False
+    assert resultado.exclusao_nao_confirmada is True
+    assert sqs.exclusoes == []
+
+    tipos = historico.tipos()
+    assert EventType.EXCLUSAO_NAO_CONFIRMADA in tipos
+    assert EventType.PROCESSADA not in tipos
+    assert EventType.EXCLUIDA not in tipos
+    assert EventType.FALHA not in tipos
+
+
+def test_delete_erro_inesperado_propaga_para_guarda() -> None:
     # Erro NÃO reconhecido como infra (sem .response, fora do MRO) é re-levantado
-    # para a guarda por iteração do consumidor (frente B).
+    # para a guarda por iteração do consumidor (frente B), que impede o laço de
+    # morrer. Aqui validamos apenas a propagação a partir de processar_mensagem.
     class ErroAwsSimulado(Exception):
         pass
 
@@ -328,10 +385,11 @@ def test_erro_no_delete_message_nao_reconhecido_propaga() -> None:
 
 
 def test_delete_receipt_handle_expirado_registra_exclusao_nao_confirmada() -> None:
-    # Núcleo da correção: delete falha por ReceiptHandle expirado -> não levanta,
-    # grava exatamente um evento exclusao_nao_confirmada, sem processada/excluida.
-    erro = _client_error("InvalidParameterValue", "The receipt handle has expired.")
-    sqs = SqsFake(erro_ao_excluir=erro)
+    # FEAT-006 / Teste 3: usa o objeto botocore ClientError padrão
+    # (ERRO_HANDLE_EXPIRADO), exercitando de verdade e_receipt_handle_expirado.
+    # Delete falha por ReceiptHandle expirado -> não levanta, grava exatamente um
+    # evento exclusao_nao_confirmada, sem processada/excluida.
+    sqs = SqsFake(erro_ao_excluir=ERRO_HANDLE_EXPIRADO)
     resultado, sqs, historico, _ = _processar(
         cenario=CenarioFalha.SUCESSO, sqs=sqs
     )
@@ -518,3 +576,135 @@ def test_extensao_ignorada_no_cenario_duracao_superior_visibility() -> None:
     )
     assert sleep.chamadas == [45]
     assert sqs.mudancas_visibility == []
+
+
+# ---------------------------------------------------------------------------
+# FEAT-006 — Testes obrigatórios 1, 2 e 11 (unitários determinísticos)
+# ---------------------------------------------------------------------------
+
+
+def test_fifo_sucesso_5s_visibility_30s_ordem_nova_e_resultado() -> None:
+    # Teste obrigatório 1 (espelho unitário em processamento): processing_seconds=5,
+    # cenário SUCESSO e delete confirmado -> eventos na NOVA ordem (delete antes de
+    # processada) e ResultadoProcessamento(sucesso=True, excluida=True).
+    sqs = SqsFake()
+    sleep = SleepFake()
+    resultado, sqs, historico, sleep = _processar(
+        cenario=CenarioFalha.SUCESSO,
+        nome_fila="lab-sqs-fifo.fifo",
+        processing_seconds=5,
+        mensagem=_mensagem(message_group_id="grupo-A"),
+        sqs=sqs,
+        sleep=sleep,
+    )
+    assert resultado.sucesso is True
+    assert resultado.excluida is True
+    assert sleep.chamadas == [5]  # processamento (5s) < Visibility (30s)
+    assert sqs.exclusoes == [("lab-sqs-fifo.fifo", "rh-001")]
+    assert historico.tipos() == [
+        EventType.RECEBIDA,
+        EventType.PROCESSAMENTO_INICIADO,
+        EventType.PROCESSADA,
+        EventType.EXCLUIDA,
+    ]
+
+
+def test_processamento_45s_visibility_30s_vira_exclusao_nao_confirmada() -> None:
+    # Teste obrigatório 2: SleepFake registra sleep(45); o delete falha por
+    # ReceiptHandle expirado (ERRO_HANDLE_EXPIRADO) -> evento
+    # exclusao_nao_confirmada presente, ausência de processada/excluida,
+    # exclusao_nao_confirmada=True, nenhuma exceção propagada.
+    sqs = SqsFake(erro_ao_excluir=ERRO_HANDLE_EXPIRADO)
+    sleep = SleepFake()
+    resultado, sqs, historico, sleep = _processar(
+        cenario=CenarioFalha.SUCESSO,
+        processing_seconds=45,
+        sqs=sqs,
+        sleep=sleep,
+    )
+    assert sleep.chamadas == [45]  # processamento (45s) > Visibility (30s)
+    assert resultado.exclusao_nao_confirmada is True
+    assert resultado.sucesso is False
+    assert resultado.excluida is False
+    tipos = historico.tipos()
+    assert EventType.EXCLUSAO_NAO_CONFIRMADA in tipos
+    assert EventType.PROCESSADA not in tipos
+    assert EventType.EXCLUIDA not in tipos
+    assert sqs.exclusoes == []  # a mensagem permanece na fila
+
+
+# --- Teste obrigatório 11: histórico nunca registra exclusão sem confirmação ---
+
+
+def _contar_excluidas_para_sequencia(
+    efeitos: list[Exception | None],
+) -> tuple[int, int]:
+    """Processa a mesma mensagem para cada efeito de delete e conta eventos.
+
+    Devolve ``(deletes_confirmados, eventos_excluida)`` acumulados ao longo das
+    reentregas simuladas: a cada efeito, uma nova tentativa de processamento
+    (reentrega) com o próximo desfecho de ``delete_message``.
+    """
+    historico = HistoricoFake()
+    deletes_confirmados = 0
+    for i, efeito in enumerate(efeitos):
+        sqs = SqsFake(efeitos_delete=[efeito])
+        _processar(
+            cenario=CenarioFalha.SUCESSO,
+            sqs=sqs,
+            historico=historico,
+            mensagem=_mensagem(receipt_handle=f"rh-{i}", receive_count=i + 1),
+            order_id="pedido-prop",
+        )
+        deletes_confirmados += len(sqs.exclusoes)
+    eventos_excluida = historico.tipos().count(EventType.EXCLUIDA)
+    return deletes_confirmados, eventos_excluida
+
+
+try:  # ``hypothesis`` é dependência de dev (ver pyproject.toml).
+    from hypothesis import given, settings
+    from hypothesis import strategies as st
+
+    _EFEITO = st.sampled_from([None, ERRO_HANDLE_EXPIRADO])
+
+    @settings(max_examples=50)
+    @given(efeitos=st.lists(_EFEITO, min_size=0, max_size=6))
+    def test_propriedade_excluida_nunca_sem_delete_confirmado(
+        efeitos: list[Exception | None],
+    ) -> None:
+        # Invariante central (Teste obrigatório 11): para qualquer sequência de
+        # desfechos de delete, o número de eventos `excluida` é <= número de
+        # deletes confirmados. Como `excluida` só é gravado após um delete que
+        # retornou com sucesso, nunca há `excluida` sem confirmação.
+        deletes_confirmados, eventos_excluida = _contar_excluidas_para_sequencia(
+            efeitos
+        )
+        assert eventos_excluida <= deletes_confirmados
+        # Cada reentrega bem-sucedida (efeito None) confirma o delete e grava
+        # exatamente um `excluida`; os efeitos de erro não geram `excluida`.
+        assert eventos_excluida == efeitos.count(None)
+
+except ImportError:  # pragma: no cover - hypothesis sempre presente em dev
+    pass
+
+
+def test_janela_pos_delete_falha_registra_log_e_nao_propaga(caplog) -> None:
+    # Complemento do Teste obrigatório 11 (janela pós-delete): o delete sucede, mas
+    # registrar_evento(processada) lança sempre -> log ERROR
+    # historico_pos_delete_falhou, ResultadoProcessamento(sucesso=True,
+    # excluida=True), sem exceção propagada. (Reaproveita HistoricoFalhaPosDelete.)
+    import logging
+
+    sqs = SqsFake()
+    historico = HistoricoFalhaPosDelete()
+    with caplog.at_level(logging.ERROR, logger="sqs_lab.resiliencia"):
+        resultado, sqs, _, _ = _processar(
+            cenario=CenarioFalha.SUCESSO, sqs=sqs, historico=historico
+        )
+    assert resultado.sucesso is True
+    assert resultado.excluida is True
+    assert sqs.exclusoes == [("lab-sqs-standard", "rh-001")]
+    assert any("historico_pos_delete_falhou" in r.message for r in caplog.records)
+    # O histórico NÃO contém `excluida` (processada falhou antes): confirmação de
+    # que nunca se registra exclusão sem o terminal correspondente.
+    assert EventType.EXCLUIDA not in historico.tipos()

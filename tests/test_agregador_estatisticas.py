@@ -273,6 +273,37 @@ def test_todos_contadores_sao_inteiros_nao_negativos() -> None:
             assert valor >= 0
 
 
+# ---------------------------------------------------------------------------
+# FEAT-006 — Contador exclusao_nao_confirmada por fluxo (apoio aos testes 2/10)
+# ---------------------------------------------------------------------------
+
+
+def test_exclusao_nao_confirmada_conta_em_contador_dedicado() -> None:
+    # Uma mensagem cujo desfecho mais recente é EXCLUSAO_NAO_CONFIRMADA conta no
+    # contador dedicado do fluxo e NÃO em processadas nem em com_falha (ainda está
+    # fisicamente na fila; o negócio concluiu mas a exclusão não foi confirmada).
+    eventos = [
+        _enviada("p-1", FILA_STANDARD),
+        _recebida("p-1", fila=FILA_STANDARD, receive_count=1),
+        _Evento(
+            EventType.PROCESSAMENTO_INICIADO, FILA_STANDARD, order_id="p-1"
+        ),
+        _Evento(
+            EventType.EXCLUSAO_NAO_CONFIRMADA,
+            FILA_STANDARD,
+            order_id="p-1",
+            receive_count=1,
+        ),
+    ]
+
+    resultado = agregar_estatisticas(eventos)
+
+    assert resultado.standard.exclusao_nao_confirmada == 1
+    assert resultado.standard.processadas == 0
+    assert resultado.standard.com_falha == 0
+    assert resultado.fifo.exclusao_nao_confirmada == 0
+
+
 def test_fluxos_sao_separados_sem_contaminacao_cruzada() -> None:
     eventos = [
         _enviada("p-1", FILA_STANDARD),

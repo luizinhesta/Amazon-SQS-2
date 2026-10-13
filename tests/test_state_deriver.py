@@ -239,3 +239,71 @@ def test_aceita_eventos_com_strings_em_vez_de_enums() -> None:
         _Evento(event_type="recebida", receive_count=1),  # type: ignore[arg-type]
     ]
     assert derivar_estado(eventos) is Estado.RECEBIDA
+
+
+# ---------------------------------------------------------------------------
+# FEAT-006 — Novo estado EXCLUSAO_NAO_CONFIRMADA: desfecho recente, reentrega
+# ativa e precedência da DLQ (apoio aos testes obrigatórios 5 e 8).
+# ---------------------------------------------------------------------------
+
+
+def test_exclusao_nao_confirmada_como_desfecho_mais_recente() -> None:
+    # O processamento terminou mas o DeleteMessage falhou (ReceiptHandle expirado):
+    # quando `exclusao_nao_confirmada` é o desfecho mais recente do ciclo, o estado
+    # derivado é EXCLUSAO_NAO_CONFIRMADA (não terminal).
+    eventos = [
+        _enviada(),
+        _recebida(1),
+        _Evento(EventType.PROCESSAMENTO_INICIADO),
+        _Evento(EventType.EXCLUSAO_NAO_CONFIRMADA, receive_count=1),
+    ]
+    assert derivar_estado(eventos) is Estado.EXCLUSAO_NAO_CONFIRMADA
+
+
+def test_reentrega_ativa_sobrepoe_exclusao_nao_confirmada() -> None:
+    # Numa reentrega ativa, um processamento_iniciado posterior sobrepõe o
+    # EXCLUSAO_NAO_CONFIRMADA anterior (não terminal): o estado volta a
+    # EM_PROCESSAMENTO enquanto a mensagem é reprocessada.
+    eventos = [
+        _enviada(),
+        _recebida(1),
+        _Evento(EventType.PROCESSAMENTO_INICIADO),
+        _Evento(EventType.EXCLUSAO_NAO_CONFIRMADA, receive_count=1),
+        _recebida(2),
+        _Evento(EventType.PROCESSAMENTO_INICIADO),
+    ]
+    assert derivar_estado(eventos) is Estado.EM_PROCESSAMENTO
+
+
+def test_processada_tem_precedencia_sobre_exclusao_nao_confirmada() -> None:
+    # Se a reentrega concluir com sucesso (processada), o estado terminal PROCESSADA
+    # prevalece sobre o EXCLUSAO_NAO_CONFIRMADA anterior (teste obrigatório 5).
+    eventos = [
+        _enviada(),
+        _recebida(1),
+        _Evento(EventType.PROCESSAMENTO_INICIADO),
+        _Evento(EventType.EXCLUSAO_NAO_CONFIRMADA, receive_count=1),
+        _recebida(2),
+        _Evento(EventType.PROCESSAMENTO_INICIADO),
+        _Evento(EventType.PROCESSADA),
+        _Evento(EventType.EXCLUIDA),
+    ]
+    assert derivar_estado(eventos) is Estado.PROCESSADA
+
+
+def test_dlq_tem_precedencia_sobre_exclusao_nao_confirmada() -> None:
+    # Teste obrigatório 8: encaminhada_dlq OBSERVADO com receive_count >=
+    # MAX_RECEIVE_COUNT -> ENCAMINHADA_DLQ, com precedência sobre
+    # EXCLUSAO_NAO_CONFIRMADA (DLQ é resolvida antes do laço).
+    eventos = [
+        _enviada(),
+        _recebida(1),
+        _Evento(EventType.EXCLUSAO_NAO_CONFIRMADA, receive_count=1),
+        _recebida(MAX_RECEIVE_COUNT),
+        _Evento(
+            EventType.ENCAMINHADA_DLQ,
+            event_source=EventSource.OBSERVADO,
+            receive_count=MAX_RECEIVE_COUNT,
+        ),
+    ]
+    assert derivar_estado(eventos) is Estado.ENCAMINHADA_DLQ

@@ -17,9 +17,12 @@ Cobertura:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Optional
 
 import json
+
+from botocore.exceptions import ClientError
 
 from app.acesso.sqs_gateway import MensagemRecebida
 from app.consumidores.consumidor_standard import (
@@ -33,6 +36,41 @@ from app.consumidores.processamento import CenarioFalha, ResultadoProcessamento
 from app.dominio import constantes as c
 from app.dominio.evento import Evento
 from app.dominio.tipos import EventType
+
+
+# Objeto de erro padrão no formato botocore real (ClientError com ``.response``),
+# usado pelos testes de reentrega para exercitar de verdade os classificadores de
+# erro do processamento (ReceiptHandle expirado).
+ERRO_HANDLE_EXPIRADO = ClientError(
+    {
+        "Error": {
+            "Code": "InvalidParameterValue",
+            "Message": "The receipt handle has expired.",
+        }
+    },
+    "DeleteMessage",
+)
+
+
+def _corpo_contrato(
+    order_id: str,
+    *,
+    cenario: str = "sucesso",
+    processing_seconds: int = 5,
+) -> str:
+    """Corpo JSON de contrato do produtor com ``order_id`` explícito.
+
+    Obrigatório nos testes do Standard porque o consumidor deriva o ``order_id`` de
+    ``payload.order_id`` sem fallback cru; sem isso a idempotência decidiria
+    REJEITAR_VALIDACAO e o processamento nunca rodaria.
+    """
+    return json.dumps(
+        {
+            "order_id": order_id,
+            "cenario": cenario,
+            "processing_seconds": processing_seconds,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -62,12 +100,29 @@ class SqsFake:
     ``lotes`` é uma lista de lotes; cada chamada a ``receive_messages`` consome o
     próximo lote. Esgotados os lotes, passa a retornar lista vazia (recebimento
     vazio), permitindo testar a repetição sem erro.
+
+    Modelo de reentrega (FEAT-006): quando ``efeitos_delete`` é fornecido, cada
+    ``delete_message`` consome o próximo item (``Exception`` -> levanta; ``None``
+    -> registra a exclusão e retorna ``{}``). Toda mensagem cujo ``delete_message``
+    **falhou** (ou que não foi excluída) **permanece** na fila do fake e é
+    **devolvida no próximo ``receive_messages``**, com ``approximate_receive_count``
+    incrementado — só saem as mensagens com delete confirmado. Isso reproduz a
+    reentrega real do SQS após a expiração do Visibility_Timeout.
     """
 
-    def __init__(self, lotes: Optional[list[list[MensagemRecebida]]] = None) -> None:
+    def __init__(
+        self,
+        lotes: Optional[list[list[MensagemRecebida]]] = None,
+        efeitos_delete: Optional[list[Optional[Exception]]] = None,
+    ) -> None:
         self._lotes = list(lotes or [])
         self.chamadas_receive: list[dict[str, Any]] = []
         self.exclusoes: list[tuple[str, str]] = []
+        self._efeitos_delete = list(efeitos_delete) if efeitos_delete else None
+        # Mensagens recebidas e ainda não excluídas, por receipt_handle, para o
+        # modelo de reentrega: reaparecem no próximo receive_messages.
+        self._pendentes: list[MensagemRecebida] = []
+        self._handles_pendentes: set[str] = set()
 
     def receive_messages(
         self,
@@ -84,12 +139,46 @@ class SqsFake:
                 "wait_time_seconds": wait_time_seconds,
             }
         )
+        # O modelo de reentrega só atua quando ``efeitos_delete`` é usado (testes
+        # que exercitam o delete falho). Sem ele, mantém o comportamento simples
+        # original: cada chamada consome o próximo lote.
+        if self._efeitos_delete is None:
+            if self._lotes:
+                return self._lotes.pop(0)
+            return []
+        # Reentrega: mensagens pendentes (delete não confirmado) voltam primeiro,
+        # com approximate_receive_count incrementado.
+        if self._pendentes:
+            reentregues = [
+                replace(
+                    m,
+                    approximate_receive_count=m.approximate_receive_count + 1,
+                )
+                for m in self._pendentes
+            ]
+            self._pendentes = list(reentregues)
+            self._handles_pendentes = {m.receipt_handle for m in reentregues}
+            return reentregues
         if self._lotes:
-            return self._lotes.pop(0)
+            lote = self._lotes.pop(0)
+            self._pendentes = list(lote)
+            self._handles_pendentes = {m.receipt_handle for m in lote}
+            return lote
         return []
 
     def delete_message(self, nome_fila: str, receipt_handle: str) -> dict[str, Any]:
+        if self._efeitos_delete is not None and self._efeitos_delete:
+            efeito = self._efeitos_delete.pop(0)
+            if efeito is not None:
+                # Delete falhou: a mensagem permanece pendente (será reentregue).
+                raise efeito
+        # Delete confirmado: remove a mensagem das pendentes (não reaparece).
         self.exclusoes.append((nome_fila, receipt_handle))
+        if receipt_handle in self._handles_pendentes:
+            self._handles_pendentes.discard(receipt_handle)
+            self._pendentes = [
+                m for m in self._pendentes if m.receipt_handle != receipt_handle
+            ]
         return {}
 
 
@@ -531,3 +620,45 @@ def test_exclusao_nao_confirmada_conta_separado_das_falhas() -> None:
     assert estat.exclusoes_nao_confirmadas == 1
     assert estat.falhas_processamento == 0
     assert estat.processadas_com_sucesso == 0
+
+
+# ---------------------------------------------------------------------------
+# FEAT-006 / Teste obrigatório 10: Standard permanece funcional após falhas
+# semelhantes (reentrega com delete falho na 1ª e confirmado na 2ª iteração),
+# usando a função real processar_mensagem (sem AWS real e sem espera real).
+# ---------------------------------------------------------------------------
+
+
+def test_standard_segue_operacional_apos_falha_de_delete_e_reentrega() -> None:
+    # Mensagem com corpo JSON de contrato (order_id explícito) + SqsFake com
+    # efeitos_delete=[ERRO_HANDLE_EXPIRADO, None] reentregando: após a 1ª iteração,
+    # exclusoes_nao_confirmadas == 1 e falhas_processamento == 0 (contador dedicado
+    # da Opção A); após a 2ª (delete confirmado), processadas_com_sucesso == 1. O
+    # laço continua operacional em ambas as iterações.
+    corpo = _corpo_contrato("pedido-std-10", processing_seconds=5)
+    sqs = SqsFake(
+        lotes=[[_mensagem(body=corpo, message_id="m1", receipt_handle="rh1")]],
+        efeitos_delete=[ERRO_HANDLE_EXPIRADO, None],
+    )
+    historico = HistoricoFake()
+    # Usa a função real processar_mensagem (default), com SleepFake (sem espera).
+    consumidor = _consumidor(sqs, historico)
+
+    # 1ª iteração: delete falha por ReceiptHandle expirado -> exclusão não confirmada.
+    consumidor.executar(max_iteracoes=1)
+    assert consumidor.estatisticas.exclusoes_nao_confirmadas == 1
+    assert consumidor.estatisticas.falhas_processamento == 0
+    assert consumidor.estatisticas.processadas_com_sucesso == 0
+    assert sqs.exclusoes == []  # nada excluído ainda
+
+    # 2ª iteração: a mensagem reentregue (handle válido) é processada e excluída.
+    consumidor.executar(max_iteracoes=1)
+    assert consumidor.estatisticas.processadas_com_sucesso == 1
+    assert consumidor.estatisticas.falhas_processamento == 0
+    assert len(sqs.exclusoes) == 1  # delete confirmado na reentrega
+
+    # Idempotência: exatamente um `processada` e um `excluida` no total.
+    tipos = historico.tipos()
+    assert tipos.count(EventType.PROCESSADA) == 1
+    assert tipos.count(EventType.EXCLUIDA) == 1
+    assert tipos.count(EventType.EXCLUSAO_NAO_CONFIRMADA) == 1

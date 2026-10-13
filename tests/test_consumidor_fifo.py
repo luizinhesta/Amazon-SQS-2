@@ -17,9 +17,11 @@ Foco dos testes (requisitos cobertos):
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Optional
 
 import pytest
+from botocore.exceptions import ClientError
 
 from app.acesso.sqs_gateway import MensagemRecebida
 from app.consumidores.consumidor_fifo import (
@@ -31,6 +33,7 @@ from app.consumidores.consumidor_fifo import (
 from app.consumidores.idempotencia import DecisaoIdempotencia, ResultadoIdempotencia
 from app.consumidores.processamento import CenarioFalha, ResultadoProcessamento
 from app.dominio import constantes as c
+from app.dominio.tipos import EventType
 
 
 # ---------------------------------------------------------------------------
@@ -58,13 +61,28 @@ class SqsFake:
       verificar os parâmetros do Long_Polling.
     - ``envios``: registra os kwargs de cada ``send_message``.
     - ``exclusoes``: registra as chamadas de ``delete_message``.
+
+    Modelo de reentrega (FEAT-006): quando ``efeitos_delete`` é fornecido, cada
+    ``delete_message`` consome o próximo item (``Exception`` -> levanta; ``None``
+    -> registra a exclusão). Toda mensagem cujo ``delete_message`` falhou **permanece
+    pendente** e é **reentregue** no próximo ``receive_messages`` com
+    ``approximate_receive_count`` incrementado; só saem as mensagens com delete
+    confirmado. A reentrega prevalece sobre os ``lotes`` restantes (como o SQS
+    reentrega antes de novas mensagens dentro do mesmo grupo).
     """
 
-    def __init__(self, lotes: Optional[list[list[MensagemRecebida]]] = None) -> None:
+    def __init__(
+        self,
+        lotes: Optional[list[list[MensagemRecebida]]] = None,
+        efeitos_delete: Optional[list[Optional[Exception]]] = None,
+    ) -> None:
         self._lotes = list(lotes or [])
         self.recebimentos: list[dict[str, Any]] = []
         self.envios: list[dict[str, Any]] = []
         self.exclusoes: list[tuple[str, str]] = []
+        self._efeitos_delete = list(efeitos_delete) if efeitos_delete else None
+        self._pendentes: list[MensagemRecebida] = []
+        self._handles_pendentes: set[str] = set()
 
     def receive_messages(
         self,
@@ -81,8 +99,29 @@ class SqsFake:
                 "wait_time_seconds": wait_time_seconds,
             }
         )
+        # O modelo de reentrega só atua quando ``efeitos_delete`` é usado (testes
+        # que exercitam o delete falho). Sem ele, mantém o comportamento simples
+        # original: cada chamada consome o próximo lote.
+        if self._efeitos_delete is None:
+            if self._lotes:
+                return self._lotes.pop(0)
+            return []
+        if self._pendentes:
+            reentregues = [
+                replace(
+                    m,
+                    approximate_receive_count=m.approximate_receive_count + 1,
+                )
+                for m in self._pendentes
+            ]
+            self._pendentes = list(reentregues)
+            self._handles_pendentes = {m.receipt_handle for m in reentregues}
+            return reentregues
         if self._lotes:
-            return self._lotes.pop(0)
+            lote = self._lotes.pop(0)
+            self._pendentes = list(lote)
+            self._handles_pendentes = {m.receipt_handle for m in lote}
+            return lote
         return []
 
     def send_message(
@@ -106,8 +145,31 @@ class SqsFake:
         return {"MessageId": f"msg-{len(self.envios)}"}
 
     def delete_message(self, nome_fila: str, receipt_handle: str) -> dict[str, Any]:
+        if self._efeitos_delete is not None and self._efeitos_delete:
+            efeito = self._efeitos_delete.pop(0)
+            if efeito is not None:
+                # Delete falhou: a mensagem permanece pendente (será reentregue).
+                raise efeito
         self.exclusoes.append((nome_fila, receipt_handle))
+        if receipt_handle in self._handles_pendentes:
+            self._handles_pendentes.discard(receipt_handle)
+            self._pendentes = [
+                m for m in self._pendentes if m.receipt_handle != receipt_handle
+            ]
         return {}
+
+
+# Objeto de erro padrão botocore (ClientError com ``.response``) para os testes de
+# reentrega — exercita de verdade os classificadores do processamento.
+ERRO_HANDLE_EXPIRADO = ClientError(
+    {
+        "Error": {
+            "Code": "InvalidParameterValue",
+            "Message": "The receipt handle has expired.",
+        }
+    },
+    "DeleteMessage",
+)
 
 
 def _msg(
@@ -122,6 +184,38 @@ def _msg(
         message_id=message_id or f"mid-{order_id}",
         receipt_handle=f"rh-{order_id}",
         body=order_id,
+        approximate_receive_count=receive_count,
+        message_group_id=grupo,
+    )
+
+
+def _msg_contrato(
+    *,
+    order_id: str,
+    grupo: str,
+    cenario: str = "sucesso",
+    processing_seconds: int = 5,
+    message_id: Optional[str] = None,
+    receive_count: int = 1,
+) -> MensagemRecebida:
+    """MensagemRecebida FIFO com corpo JSON de contrato (``order_id`` explícito).
+
+    Usada nos testes que exercitam a função real ``processar_mensagem`` (reentrega),
+    para uniformizar com o Standard e garantir a decisão de idempotência PROCESSAR.
+    """
+    import json
+
+    corpo = json.dumps(
+        {
+            "order_id": order_id,
+            "cenario": cenario,
+            "processing_seconds": processing_seconds,
+        }
+    )
+    return MensagemRecebida(
+        message_id=message_id or f"mid-{order_id}",
+        receipt_handle=f"rh-{order_id}",
+        body=corpo,
         approximate_receive_count=receive_count,
         message_group_id=grupo,
     )
@@ -564,3 +658,154 @@ def test_exclusao_nao_confirmada_contada_separada_no_fifo() -> None:
 
     assert resultado.processadas_do_grupo == ["p1", "p2"]
     assert resultado.exclusoes_nao_confirmadas == ["p2"]
+
+
+# ---------------------------------------------------------------------------
+# FEAT-006 — Testes obrigatórios 1, 4, 5, 6 e 7 (com a função real
+# processar_mensagem / verificar_idempotencia; fakes, sem AWS real nem espera real).
+# ---------------------------------------------------------------------------
+
+
+class HistoricoPersistente:
+    """HistoricoRepository fake persistente: acumula eventos e consulta por pedido.
+
+    Diferente do ``HistoricoFake`` mínimo, implementa ``consultar_por_pedido`` com
+    filtro real por ``order_id`` para que a verificação de idempotência enxergue o
+    histórico ao longo das reentregas (teste 5).
+    """
+
+    def __init__(self) -> None:
+        self.eventos: list[Any] = []
+
+    def registrar_evento(self, evento: Any) -> None:
+        self.eventos.append(evento)
+
+    def consultar_por_pedido(self, order_id: str) -> list[Any]:
+        return [e for e in self.eventos if getattr(e, "order_id", None) == order_id]
+
+    def tipos(self) -> list[Any]:
+        return [e.event_type for e in self.eventos]
+
+
+def _consumidor_real(
+    sqs: SqsFake,
+    *,
+    historico: HistoricoPersistente,
+    consumer_id: str = "consumidor-fifo-real",
+) -> ConsumidorFifo:
+    """Consumidor FIFO com idempotência e processamento REAIS (sem espera real)."""
+    return ConsumidorFifo(
+        sqs=sqs,  # type: ignore[arg-type]
+        historico=historico,  # type: ignore[arg-type]
+        consumer_id=consumer_id,
+        sleep=lambda _s: None,  # SleepFake equivalente: não espera de verdade.
+    )
+
+
+def test_fifo_sucesso_5s_visibility_30s_eventos_na_nova_ordem() -> None:
+    # Teste obrigatório 1 (espelho FIFO): processing_seconds=5, cenário SUCESSO,
+    # delete confirmado -> eventos na NOVA ordem recebida, processamento_iniciado,
+    # processada, excluida e processamento efetivo do grupo.
+    historico = HistoricoPersistente()
+    msg = _msg_contrato(order_id="pedido-1", grupo="grupo-A", processing_seconds=5)
+    sqs = SqsFake(lotes=[[msg]])
+    consumidor = _consumidor_real(sqs, historico=historico)
+
+    resultado = consumidor.processar_uma_iteracao()
+
+    assert resultado.grupo_selecionado == "grupo-A"
+    assert resultado.processadas_do_grupo == ["pedido-1"]
+    assert resultado.exclusoes_nao_confirmadas == []
+    assert len(sqs.exclusoes) == 1
+    tipos = historico.tipos()
+    assert tipos == [
+        EventType.RECEBIDA,
+        EventType.PROCESSAMENTO_INICIADO,
+        EventType.PROCESSADA,
+        EventType.EXCLUIDA,
+    ]
+
+
+def test_fifo_segue_operacional_apos_falha_de_delete() -> None:
+    # Teste obrigatório 4: SqsFake(efeitos_delete=[ERRO_HANDLE_EXPIRADO, None]) com
+    # reentrega. executar(max_iteracoes=2) -> 2 iterações completas, iteração 1 com
+    # exclusão não confirmada, iteração 2 confirmando o delete; laço não interrompido.
+    historico = HistoricoPersistente()
+    msg = _msg_contrato(order_id="pedido-4", grupo="grupo-A", processing_seconds=5)
+    sqs = SqsFake(lotes=[[msg]], efeitos_delete=[ERRO_HANDLE_EXPIRADO, None])
+    consumidor = _consumidor_real(sqs, historico=historico)
+
+    resumo = consumidor.executar(
+        criterio_parada=_parar_apos(2), max_iteracoes=2
+    )
+
+    assert len(resumo.iteracoes) == 2
+    assert resumo.iteracoes_com_erro == 0  # o laço não quebrou em nenhuma iteração
+    # 1ª iteração: delete falha -> exclusão não confirmada (sem exclusão).
+    assert resumo.iteracoes[0].exclusoes_nao_confirmadas == ["pedido-4"]
+    # 2ª iteração: reentrega com handle válido -> delete confirmado.
+    assert len(sqs.exclusoes) == 1
+
+
+def test_fifo_reentrega_nao_duplica_operacao_de_negocio() -> None:
+    # Teste obrigatório 5: HistoricoPersistente entre iterações +
+    # efeitos_delete=[ERRO_HANDLE_EXPIRADO, None]. 1ª iteração grava
+    # exclusao_nao_confirmada (sem processada); 2ª (reentrega, handle válido) ->
+    # idempotência PROCESSAR -> grava processada+excluida; exatamente UM processada
+    # e UM excluida no total; derivação final Estado.PROCESSADA.
+    from app.dominio.state_deriver import derivar_estado
+    from app.dominio.tipos import Estado
+
+    historico = HistoricoPersistente()
+    msg = _msg_contrato(order_id="pedido-5", grupo="grupo-A", processing_seconds=5)
+    sqs = SqsFake(lotes=[[msg]], efeitos_delete=[ERRO_HANDLE_EXPIRADO, None])
+    consumidor = _consumidor_real(sqs, historico=historico)
+
+    consumidor.executar(criterio_parada=_parar_apos(2), max_iteracoes=2)
+
+    tipos = historico.tipos()
+    assert tipos.count(EventType.EXCLUSAO_NAO_CONFIRMADA) == 1
+    assert tipos.count(EventType.PROCESSADA) == 1
+    assert tipos.count(EventType.EXCLUIDA) == 1
+    eventos_pedido = historico.consultar_por_pedido("pedido-5")
+    assert derivar_estado(eventos_pedido) is Estado.PROCESSADA
+
+
+def test_fifo_ordem_do_mesmo_grupo_preservada() -> None:
+    # Teste obrigatório 6: lote grupo-A [m1, m2] -> ordem_recebimento_do_grupo ==
+    # [m1, m2] e processadas_do_grupo na mesma ordem.
+    lote = [
+        _msg(order_id="m1", grupo="grupo-A"),
+        _msg(order_id="m2", grupo="grupo-A"),
+    ]
+    sqs = SqsFake(lotes=[lote])
+    processador = ProcessadorFake()
+    consumidor = _consumidor(sqs, processador=processador)
+
+    resultado = consumidor.processar_uma_iteracao()
+
+    assert resultado.ordem_recebimento_do_grupo == ["m1", "m2"]
+    assert resultado.processadas_do_grupo == ["m1", "m2"]
+    assert processador.ordem_processada == ["m1", "m2"]
+
+
+def test_fifo_isolamento_entre_grupos_so_exclui_grupo_selecionado() -> None:
+    # Teste obrigatório 7: lote com grupo-A e grupo-B, uma iteração, apenas os
+    # receipt_handle do grupo selecionado aparecem em SqsFake.exclusoes (nenhum do
+    # outro grupo). Usa a função real processar_mensagem para exclusões reais.
+    historico = HistoricoPersistente()
+    lote = [
+        _msg_contrato(order_id="a1", grupo="grupo-A", processing_seconds=1),
+        _msg_contrato(order_id="b1", grupo="grupo-B", processing_seconds=1),
+        _msg_contrato(order_id="a2", grupo="grupo-A", processing_seconds=1),
+    ]
+    sqs = SqsFake(lotes=[lote])
+    consumidor = _consumidor_real(sqs, historico=historico)
+
+    resultado = consumidor.processar_uma_iteracao()
+
+    assert resultado.grupo_selecionado == "grupo-A"
+    handles_excluidos = {rh for _fila, rh in sqs.exclusoes}
+    # Apenas os handles do grupo selecionado (grupo-A) foram excluídos.
+    assert handles_excluidos == {"rh-a1", "rh-a2"}
+    assert "rh-b1" not in handles_excluidos

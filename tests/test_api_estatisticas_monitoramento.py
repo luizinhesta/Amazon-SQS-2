@@ -193,6 +193,44 @@ def test_estatisticas_log_vazio_retorna_zeros() -> None:
     assert corpo["standard"]["recebidas_por_consumidor"] == []
 
 
+def test_estatisticas_serializa_exclusao_nao_confirmada_por_fluxo() -> None:
+    # FEAT-006 (apoio): o contador exclusao_nao_confirmada aparece por fluxo no JSON
+    # de /api/estatisticas (default 0, retrocompatível) e reflete uma mensagem cujo
+    # desfecho mais recente é a exclusão não confirmada.
+    eventos = [
+        _evento(order_id="s1", queue_name=c.FILA_STANDARD, event_type=EventType.ENVIADA),
+        _evento(
+            order_id="s1",
+            queue_name=c.FILA_STANDARD,
+            event_type=EventType.RECEBIDA,
+            receive_count=1,
+            consumer_id="consumidor-1",
+        ),
+        _evento(
+            order_id="s1",
+            queue_name=c.FILA_STANDARD,
+            event_type=EventType.PROCESSAMENTO_INICIADO,
+            consumer_id="consumidor-1",
+        ),
+        _evento(
+            order_id="s1",
+            queue_name=c.FILA_STANDARD,
+            event_type=EventType.EXCLUSAO_NAO_CONFIRMADA,
+            receive_count=1,
+            consumer_id="consumidor-1",
+        ),
+    ]
+    cliente = _criar_cliente(_HistoricoFake(eventos))
+
+    corpo = cliente.get("/api/estatisticas").json()
+
+    assert corpo["standard"]["exclusao_nao_confirmada"] == 1
+    assert corpo["standard"]["processadas"] == 0
+    assert corpo["standard"]["com_falha"] == 0
+    # Default retrocompatível (0) no fluxo sem o evento.
+    assert corpo["fifo"]["exclusao_nao_confirmada"] == 0
+
+
 def test_estatisticas_timeout_retorna_indicacao_sem_dados() -> None:
     # Força o caminho de timeout com um limite <= 0 (determinístico, sem esperar 3 s).
     resposta = servico.obter_estatisticas(
