@@ -13,6 +13,7 @@
   - [Fluxo FIFO](#fluxo-fifo)
   - [Fluxo de falha e reentrega](#fluxo-de-falha-e-reentrega-expiração-do-visibility_timeout)
   - [Fluxo de encaminhamento para a DLQ](#fluxo-de-encaminhamento-para-a-dlq)
+- [Resiliência dos consumidores e diferenciação de falhas](#resiliência-dos-consumidores-e-diferenciação-de-falhas)
 - [Integração com o DynamoDB](#integração-com-o-dynamodb)
 - [Integração com o Dashboard](#integração-com-o-dashboard)
 - [Permissões IAM (mínimo privilégio)](#permissões-iam-mínimo-privilégio)
@@ -25,7 +26,7 @@ Toda a aplicação é executada em uma instância **Amazon EC2** Linux na regiã
 
 A autenticação com a AWS ocorre **exclusivamente** pela **IAM_Role_EC2** anexada ao perfil da instância: o `boto3` resolve credenciais temporárias pela cadeia de provedores padrão (via metadata service da EC2), sem nenhuma Access Key fixa em código, configuração ou variável de ambiente. Isso é confirmado no código das camadas de acesso, que criam os clientes `boto3` sem `aws_access_key_id`/`aws_secret_access_key`.
 
-Como o SQS **não** oferece API para consultar o estado individual de todas as mensagens, o estado observável é derivado de um **log de eventos** persistido na **Tabela_Historico** (DynamoDB). Cada ação do ciclo de vida gera um item de evento; o Estado de cada mensagem (Aguardando, Recebida, Em processamento, Processada, Falha, Aguardando nova tentativa, Encaminhada para DLQ) é **derivado** desses eventos pelo componente `StateDeriver` (`app/dominio/state_deriver.py`), nunca armazenado como campo mutável.
+Como o SQS **não** oferece API para consultar o estado individual de todas as mensagens, o estado observável é derivado de um **log de eventos** persistido na **Tabela_Historico** (DynamoDB). Cada ação do ciclo de vida gera um item de evento; o Estado de cada mensagem (Aguardando, Recebida, Em processamento, Processada, Exclusão não confirmada, Falha, Aguardando nova tentativa, Encaminhada para DLQ) é **derivado** desses eventos pelo componente `StateDeriver` (`app/dominio/state_deriver.py`), nunca armazenado como campo mutável.
 
 Decisões de arquitetura relevantes:
 
@@ -175,7 +176,7 @@ flowchart TD
 2. Para cada envio bem-sucedido, a API registra um `Evento_Observado` `enviada` na Tabela_Historico.
 3. O **Consumidor_Standard** recebe mensagens em lotes de 1 a 10 com **Long_Polling** (`WaitTimeSeconds=20`), lê `ApproximateReceiveCount` e registra `recebida` (com `consumer_id` e tentativas).
 4. Verifica idempotência por `order_id` na Tabela_Historico; se já houver `processada`, registra `recebimento_repetido` e não reexecuta efeitos.
-5. Processa pelo `Tempo_Processamento_Simulado`, registra `processada` e, **somente em caso de sucesso**, executa `DeleteMessage` e registra `excluida`.
+5. Processa pelo `Tempo_Processamento_Simulado` e, **somente em caso de sucesso**, executa `DeleteMessage` **primeiro** e, com a exclusão confirmada, registra `processada` e `excluida` (nessa ordem — ver [Resiliência dos consumidores](#resiliência-dos-consumidores-e-diferenciação-de-falhas)). Se o `DeleteMessage` falhar por erro de infraestrutura, registra `exclusao_nao_confirmada` sem gravar `processada`/`excluida`.
 
 ### Fluxo FIFO
 
@@ -196,6 +197,87 @@ flowchart TD
 1. Após as tentativas atingirem o `maxReceiveCount` da Redrive_Policy (2), o **SQS** move automaticamente a mensagem para a DLQ correspondente (`lab-sqs-standard-dlq` ou `lab-sqs-fifo-dlq.fifo`).
 2. O Sistema **só** registra `encaminhada_dlq` como `Evento_Observado` quando a presença da mensagem na DLQ é confirmada (via `ReceiveMessage` na DLQ ou pela Redrive_Policy). Nunca deriva "Encaminhada para DLQ" apenas por expiração de Visibility_Timeout; exige `receive_count >= maxReceiveCount`.
 3. O reprocessamento (`POST /api/laboratorio/reprocessar-dlq`) usa `SqsGateway.redrive_from_dlq`: recebe da DLQ, reenvia à fila principal e só então exclui da DLQ (reenvio antes da exclusão evita perda de mensagem; preserva `MessageGroupId`/`MessageDeduplicationId` no caso FIFO).
+
+## Resiliência dos consumidores e diferenciação de falhas
+
+Esta seção documenta a correção de resiliência do laboratório: o tratamento do `DeleteMessage` falho, a supervisão dos consumidores, o módulo de log estruturado e a diferenciação de falhas no Dashboard. A correção não cria, modifica nem exclui recursos AWS e preserva todos os cenários didáticos.
+
+### Reordenação `delete` → `processada` e o estado `Exclusão não confirmada`
+
+No caminho de sucesso de `processar_mensagem` (`app/consumidores/processamento.py`), a ordem das operações passou a ser: executar `DeleteMessage` **antes** de registrar `processada`. Somente após a confirmação da exclusão é que os eventos `processada` (seq 3) e `excluida` (seq 4) são gravados, nessa ordem.
+
+A motivação é a relação com a **idempotência por `order_id`**. Na implementação anterior, `processada` era gravado antes do `DeleteMessage`; quando o `ReceiptHandle` expirava (processamento mais longo que o `Visibility_Timeout`), a exclusão falhava, mas o histórico já continha `processada`. Numa reentrega, `derivar_estado` retornava `Processada` e a idempotência respondia "já processado", de modo que a mensagem nunca era excluída e ficava em loop até a DLQ — com o histórico afirmando "processada" enquanto a mensagem seguia fisicamente na fila. Com a reordenação, `processada` só existe quando a exclusão foi confirmada, então uma reentrega com `ReceiptHandle` válido é autorizada a reprocessar e finaliza o ciclo corretamente.
+
+Quando o `DeleteMessage` falha por erro de infraestrutura reconhecido, a aplicação registra o novo Evento_Observado `exclusao_nao_confirmada` (seq 3, com o erro original em `error_detail`) e retorna um `ResultadoProcessamento` com `sucesso=False`, `excluida=False` e `exclusao_nao_confirmada=True`, sem gravar `processada` nem `excluida`. A classificação do erro usa dois helpers puros em `app/acesso/sqs_gateway.py` (o `delete_message` do gateway permanece inalterado, repassando o erro bruto da AWS):
+
+- `e_receipt_handle_expirado(erro)` — `True` para `ReceiptHandleIsInvalid` e para `InvalidParameterValue` cuja mensagem contém "receipt handle has expired";
+- `e_erro_infra_sqs(erro)` — `True` para qualquer `ClientError`/`BotoCoreError` (identificado por `getattr(erro, "response", None)` ou pelo MRO do tipo, sem importar `botocore` no topo do módulo).
+
+Um erro **não** reconhecido como infraestrutura é re-levantado por `processar_mensagem` e tratado pela guarda por iteração do consumidor (abaixo), de modo que a thread não morre em nenhum dos casos.
+
+O estado derivado **Exclusão não confirmada** é **não terminal**: não entra em `ESTADOS_TERMINAIS` (que segue com `Processada` e `Encaminhada para DLQ`). No `StateDeriver`, `Encaminhada para DLQ` e `Processada` são resolvidos antes do laço reverso e têm precedência; o novo estado é retornado quando `exclusao_nao_confirmada` é o desfecho cronologicamente mais recente. Numa reentrega ativa, um `recebida`/`processamento_iniciado` posterior sobrepõe o estado (retorna `Recebida`/`Em processamento`), o que é o comportamento desejado. Por construção, no caminho de sucesso com delete falho **nenhum** evento `falha` é gravado para aquela tentativa — grava-se apenas `exclusao_nao_confirmada` —, de modo que os dois nunca coexistem na mesma tentativa.
+
+**Janela crítica pós-delete (limite conhecido).** A reordenação abre uma janela estreita: se o `DeleteMessage` tiver sucesso mas a gravação de `processada`/`excluida` falhar (DynamoDB indisponível nos milissegundos seguintes), a mensagem já saiu da fila e o histórico fica sem o terminal. Nesse caso, `processar_mensagem` emite o log `ERROR` estruturado `historico_pos_delete_falhou` (com `order_id`, `fila`, `consumer_id`, `evento_pendente` e `erro`), **não** re-levanta a exceção e retorna `sucesso=True`/`excluida=True` (o delete de fato ocorreu). É um risco conhecido e **auditável** pelo log, não um caminho silencioso.
+
+### Guarda por iteração e supervisão por slots
+
+Cada consumidor ganhou uma guarda por iteração que captura `Exception` (nunca `BaseException`, para não interferir na `InterrupcaoProcessamento` nem na parada cooperativa):
+
+- No `ConsumidorStandard`, a chamada de `_executar_iteracao()` é envolvida em `try/except`: um erro incrementa `EstatisticasConsumo.iteracoes_com_erro`, registra `iteracao_consumidor_falhou` (`WARNING`) e o laço continua. O desfecho por mensagem é contabilizado em ramos distintos: `sucesso` → `processadas_com_sucesso`; `exclusao_nao_confirmada` → contador dedicado `exclusoes_nao_confirmadas` (**nunca** `falhas_processamento`); demais → `falhas_processamento`.
+- No `ConsumidorFifo`, o laço sempre anexa um `ResultadoIteracaoFifo` por iteração (inclusive em erro, com o campo `erro` preenchido), expõe `iteracoes_com_erro` como propriedade e contabiliza a exclusão não confirmada separada das falhas.
+
+O `GerenciadorConsumidores` (`app/main.py`) foi reescrito em torno de uma lista de **slots** (`_SlotConsumidor`), um por instância de consumidor, cada slot com `tipo`, `consumidor`, `thread`, `reinicios`, `marcos_reinicio` e `degradado`. A composição:
+
+- **`iniciar()`** é idempotente (`if self._slots: return`), cria N slots por tipo (N vem de `estado_instancias`) e inicia uma thread daemon supervisora (`supervisor-consumidores`).
+- Os alvos de thread `_executar_standard`/`_executar_fifo` têm um `try/except Exception` externo que registra `consumidor_encerrou_por_erro` (`ERROR`) e **retorna** — a thread encerra limpa, sem exceção subindo ao runtime.
+- A **thread supervisora** acorda a cada `INTERVALO_SUPERVISAO_SEGUNDOS` (via `self._parada.wait(...)`, para despertar imediatamente no shutdown) e, para cada slot com `not thread.is_alive()` **e** `not self._deve_parar()` **e** `not slot.degradado`, chama `_recriar_slot`. A chave anti-duplicação é só substituir threads **já mortas** — nunca há uma segunda thread para um slot vivo.
+- **Política de reinício com teto.** `_recriar_slot` cria consumidor + thread novos (novo `consumer_id`) no mesmo índice, poda os marcos fora de `JANELA_REINICIOS_SEGUNDOS` e incrementa `reinicios`. Ao exceder `MAX_REINICIOS_JANELA` reinícios na janela, marca `degradado=True`, registra `consumidor_em_falha_persistente` (`ERROR`) e para de reiniciar aquele slot, para não mascarar um problema real.
+- **Ordem de `parar()`:** (1) `self._parada.set()`; (2) `.parar()` em cada `ConsumidorStandard`; (3) `join` da supervisora **antes** dos slots (para que nenhuma recriação ocorra durante o shutdown); (4) `join(timeout=5.0)` por slot; (5) limpar `self._slots`.
+
+As novas constantes ficam em `app/dominio/constantes.py`: `INTERVALO_SUPERVISAO_SEGUNDOS = 5`, `MAX_REINICIOS_JANELA = 5`, `JANELA_REINICIOS_SEGUNDOS = 60` e `HEARTBEAT_VISIBILITY_SEGUNDOS = 20`. O `Visibility_Timeout` (30 s) e o `maxReceiveCount` (2) permanecem inalterados.
+
+**Limites conhecidos declarados.** A supervisão recupera apenas threads **mortas** (`not is_alive()`). Uma thread **viva mas travada** (bloqueada indefinidamente numa chamada que, por defeito, não respeite o timeout do boto3) **não** é detectada nem reiniciada — está fora de escopo, pois `is_alive()` não distingue "trabalhando" de "travada" e um watchdog por heartbeat seria complexidade desproporcional. Como as threads são daemon, o `join(timeout=5.0)` pode não aguardar o fim de um `ReceiveMessage` com Long_Polling de 20 s, mas isso é intencional: o timeout dá uma janela de encerramento cooperativo sem bloquear o shutdown.
+
+### Extensão opt-in do Visibility_Timeout
+
+`processar_mensagem` aceita parâmetros opt-in para renovar o `Visibility_Timeout` de uma mensagem recebida via `SqsGateway.change_message_visibility` (passthrough puro, fiel ao contrato "erro bruto da AWS"). A validação de faixa é feita por uma **função pura** em `processamento.py` (owner único; o gateway não valida): quando ligada, o valor é obrigatório, inteiro e dentro de `[HEARTBEAT_VISIBILITY_SEGUNDOS, 43200]` (o SQS limita a visibilidade por mensagem a 12 h); fora disso levanta `ValueError` **antes** de qualquer chamada à AWS.
+
+O recurso vem **desligado por padrão** — com a flag desligada o comportamento é idêntico ao atual. Quando ligada e o cenário é de sucesso, o processamento dorme em fatias de `HEARTBEAT_VISIBILITY_SEGUNDOS` e renova o prazo entre as fatias; uma falha de renovação registra `change_message_visibility_falhou` (`WARNING`) e segue sem renovar (best-effort, nunca aborta). O cenário `duracao_superior_visibility` ignora a extensão, preservando o teste didático de expiração proposital. Em nenhum caso o atributo `Visibility_Timeout` da fila é alterado — a ação é por mensagem.
+
+### Módulo de observabilidade (`app/observabilidade/log_estruturado.py`)
+
+O registro estruturado de falhas usa somente a biblioteca padrão (`logging` + `json`), sem dependência nova. O módulo expõe `log_evento(nivel, evento, **campos)`, que emite uma linha JSON pelo logger `sqs_lab.resiliencia` (`ensure_ascii=False`, `default=str`) e nunca levanta. Os principais eventos emitidos: `delete_message_falhou` e `historico_pos_delete_falhou` (`ERROR`), `consumidor_encerrou_por_erro` e `consumidor_em_falha_persistente` (`ERROR`), `consumidor_reiniciado`, `iteracao_consumidor_falhou` e `change_message_visibility_falhou` (`WARNING`). O erro original é sempre preservado tanto no log (`erro=repr(erro)`) quanto no `error_detail` do evento de histórico correspondente.
+
+### Endpoint de saúde dos consumidores
+
+O endpoint `GET /api/consumidores/saude` (serviço `app/api/servico_saude_consumidores.py`, schema `RespostaSaudeConsumidores`) inspeciona apenas o estado **em memória** dos slots — **nunca** chama a AWS — lendo `gerenciador.estado_slots()`. A resposta tem o formato:
+
+```json
+{
+  "iniciados": true,
+  "algum_morto": false,
+  "algum_degradado": false,
+  "consumidores": [
+    {"tipo": "standard", "consumer_id": "consumidor-standard-...", "vivo": true, "degradado": false, "reinicios": 0},
+    {"tipo": "fifo", "consumer_id": "consumidor-fifo-...", "vivo": true, "degradado": false, "reinicios": 0}
+  ]
+}
+```
+
+Quando o gerenciador ainda não foi iniciado (ex.: `create_app` isolado), responde `iniciados: false` com lista vazia e nunca retorna 500. O endpoint `/api/consumidores/saude` é registrado como rota literal **antes** de `/api/consumidores/{tipo}/instancias`, para não conflitar com a rota variável.
+
+Além disso, `EstatisticasFluxoSaida` ganhou o campo `exclusao_nao_confirmada` (`Field(0, ge=0)`, com default 0 para retrocompatibilidade), propagado por `servico_monitoramento._fluxo_para_saida` a partir do agregador. Assim o contador de exclusões não confirmadas por fluxo aparece em `GET /api/estatisticas`, separado do contador de falhas.
+
+### Diferenciação de falhas no Dashboard
+
+O `onTick` em `web/js/main.js` passou a consultar três endpoints via `Promise.allSettled` (`obterEstatisticas`, `obterMonitoramento`, `obterSaudeConsumidores`) e a aplicar a faixa de status global por **precedência**, de mais grave para menos grave:
+
+1. **API indisponível (vermelha, `global-status--error`)** — estatísticas **e** monitoramento rejeitaram por erro real de rede/HTTP (`ApiError`). A saúde não entra nesta decisão.
+2. **Consumidor em falha (amarela, `global-status--warn`)** — o endpoint de saúde resolveu e aponta `algum_morto` ou `algum_degradado`; o texto descreve o primeiro slot problemático. A rejeição da própria chamada de saúde **não** aciona amarela (a saúde é informativa; não se inventa estado de consumidor).
+3. **Timeout de cálculo (laranja, `global-status--stale`)** — alguma resposta resolveu com `timeout: true`; o texto é a constante fixa `MENSAGEM_TIMEOUT_CALCULO` do frontend (fonte única), ignorando o `mensagem` do backend nesse caminho.
+4. **Sucesso** — `marcarSucesso` limpa as três classes de estado.
+
+As classes CSS `global-status--error`, `global-status--warn` e `global-status--stale` convivem em `web/styles.css`, mutuamente exclusivas. O estado `Exclusão não confirmada` ganhou a entrada `'Exclusão não confirmada': 'estado-exclusao-nao-confirmada'` no mapa fechado `CLASSE_ESTADO` de `monitoring.js` (sem cair no fallback neutro) e uma linha distinta por fluxo em `overview.js`, separada da linha "Com falha". A regra transversal é não esconder erros reais nem apresentar dado simulado como confirmado pela AWS: o endpoint de saúde reflete `thread.is_alive()` real e `exclusao_nao_confirmada` só é gravado após a AWS rejeitar o delete.
 
 ## Integração com o DynamoDB
 
@@ -238,12 +320,13 @@ O **Dashboard** (`web/index.html`, `web/styles.css`, `web/js/`) é servido pela 
 | Envio de 1 a 10 mensagens | `enviarMensagens` | `POST /api/mensagens` |
 | Estatísticas por fluxo | `obterEstatisticas` | `GET /api/estatisticas` |
 | Tabela de monitoramento | `obterMonitoramento` | `GET /api/monitoramento` |
+| Saúde dos consumidores (slots em memória) | `obterSaudeConsumidores` | `GET /api/consumidores/saude` |
 | Linha do tempo de uma mensagem | `obterHistorico` | `GET /api/mensagens/{order_id}/historico` |
 | Cenário de falha | `executarCenario` | `POST /api/laboratorio/cenario` |
 | Reprocessar DLQ | `reprocessarDlq` | `POST /api/laboratorio/reprocessar-dlq` |
 | Ajustar instâncias (1 a 10) | `ajustarInstancias` | `PUT /api/consumidores/{tipo}/instancias` |
 
-O Dashboard organiza cinco áreas (visão geral, envio, monitoramento, histórico detalhado e laboratório de falhas), exibe o Estado derivado pelo `StateDeriver`, indica cada evento como Observado ou Inferido e atualiza estatísticas e monitoramento periodicamente. Em falha de atualização, preserva os últimos dados válidos e indica que os dados podem estar desatualizados. As respostas de `/api/estatisticas` e `/api/monitoramento` aplicam timeout de 3 s e devolvem indicação de timeout ao exceder.
+O Dashboard organiza cinco áreas (visão geral, envio, monitoramento, histórico detalhado e laboratório de falhas), exibe o Estado derivado pelo `StateDeriver`, indica cada evento como Observado ou Inferido e atualiza estatísticas e monitoramento periodicamente. Em falha de atualização, preserva os últimos dados válidos e diferencia as causas na faixa de status global (API indisponível, consumidor em falha, timeout de cálculo e sucesso). As respostas de `/api/estatisticas` e `/api/monitoramento` aplicam timeout de cálculo de 10 s (`TIMEOUT_PADRAO_SEGUNDOS`) e devolvem `timeout: true` (HTTP 200, preservando os últimos dados válidos) ao exceder — ver a seção [Resiliência dos consumidores e diferenciação de falhas](#resiliência-dos-consumidores-e-diferenciação-de-falhas).
 
 ## Permissões IAM (mínimo privilégio)
 
@@ -257,6 +340,7 @@ Ações necessárias:
 | SQS | `sqs:SendMessage` | Envio de mensagens e reenvio no redrive (`send_message`). |
 | SQS | `sqs:ReceiveMessage` | Recebimento com Long_Polling e detecção na DLQ (`receive_messages`). |
 | SQS | `sqs:DeleteMessage` | Exclusão após sucesso e no redrive (`delete_message`). |
+| SQS | `sqs:ChangeMessageVisibility` | **Somente se** a extensão opt-in de Visibility_Timeout for ligada (`change_message_visibility`). Com a flag desligada (padrão), a ação não é chamada. |
 | SQS | `sqs:GetQueueAttributes` | Verificação de inicialização, SSE-SQS e inspeção da Redrive_Policy (`get_queue_attributes`). |
 | DynamoDB | `dynamodb:PutItem` | Registro de cada evento (`registrar_evento`). |
 | DynamoDB | `dynamodb:Query` | Consultas por pedido, por fila (via `GSI1`), cronológica e contagem de tentativas. |
@@ -303,3 +387,5 @@ Exemplo de política IAM de mínimo privilégio (substitua `AWS_ACCOUNT_ID` pelo
 ```
 
 > A administração da EC2 via **Session Manager** requer a policy gerenciada `AmazonSSMManagedInstanceCore` anexada à IAM_Role_EC2. Essa permissão é de administração da instância (acesso sem SSH) e é independente das ações de SQS/DynamoDB usadas pela aplicação.
+
+> **Extensão opt-in de Visibility_Timeout:** a ação `sqs:ChangeMessageVisibility` **não** consta na política acima porque o recurso vem **desligado por padrão** e, nesse estado, nunca é chamado. Se você optar por ligá-lo, adicione `"sqs:ChangeMessageVisibility"` à lista de ações do bloco `SqsFilasDoLaboratorio`. A ação ajusta apenas a visibilidade de uma mensagem recebida e **não** altera o atributo `Visibility_Timeout` (30 s) da fila.

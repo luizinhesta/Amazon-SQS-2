@@ -328,6 +328,103 @@ sudo systemctl status lab-sqs.service
 
 ---
 
+## Parte 6.1 — Aplicar a correção de resiliência FIFO na EC2 (sem reiniciar automaticamente)
+
+Esta parte descreve como implantar a correção de resiliência dos consumidores (reordenação `delete`→`processada`, evento/estado `exclusao_nao_confirmada`, supervisão por slots, endpoint `GET /api/consumidores/saude`, faixas diferenciadas do Dashboard e extensão opt-in de Visibility_Timeout) em uma EC2 **já em produção**, com a aplicação em execução.
+
+> **Princípio desta parte:** **não** reinicie o serviço automaticamente durante a análise. Primeiro faça **backup** e versione a mudança; depois **apresente as alterações e peça confirmação**; só então, em uma janela controlada, reinicie o serviço manualmente. Durante toda a correção: **não** recrie filas, **não** limpe o DynamoDB, **não** altere o `Visibility_Timeout` de 30 s nem a IAM, e **não** mude parâmetros de fila para mascarar o erro.
+
+### Etapa 14.1 — Backup e versionamento antes de qualquer mudança
+
+Execute no terminal do **Session Manager**, como `ec2-user`, dentro de `/home/ec2-user/amazon-sqs2`:
+
+1. Registrar a revisão atualmente implantada (para rollback):
+
+```bash
+cd /home/ec2-user/amazon-sqs2
+git rev-parse HEAD | tee /home/ec2-user/deploy-revisao-anterior.txt
+```
+
+- **O que faz:** grava o commit atualmente em execução em um arquivo. **Por quê:** permite voltar exatamente a esta versão se a correção apresentar problema. **Resultado esperado:** o arquivo `deploy-revisao-anterior.txt` contém o hash do commit atual.
+
+2. Backup versionado do código e da configuração do serviço:
+
+```bash
+tar -czf /home/ec2-user/backup-amazon-sqs2-$(date +%Y%m%d-%H%M%S).tar.gz \
+  -C /home/ec2-user amazon-sqs2
+sudo cp /etc/systemd/system/lab-sqs.service \
+  /home/ec2-user/lab-sqs.service.bak-$(date +%Y%m%d-%H%M%S)
+```
+
+- **O que faz:** cria um arquivo `.tar.gz` com o diretório do projeto e uma cópia da unit `systemd`, ambos com carimbo de data/hora. **Por quê:** backup imutável do estado anterior, independente do histórico Git. **Resultado esperado:** os dois arquivos de backup aparecem em `/home/ec2-user`.
+
+> Como o laboratório **não** usa IaC, o versionamento da correção é feito pelo próprio Git (a correção vem em um branch/commit dedicado). Os recursos AWS **não** são alterados por esta implantação.
+
+### Etapa 14.2 — Obter a correção sem reiniciar o serviço
+
+1. Buscar a nova revisão sem aplicá-la ainda:
+
+```bash
+git fetch origin
+git log --oneline origin/main -5
+```
+
+- **O que faz:** baixa as referências remotas e lista os últimos commits. **Por quê:** inspecionar a correção **antes** de aplicá-la. **Resultado esperado:** a lista mostra os commits da correção de resiliência.
+
+2. Aplicar o código novo no diretório (o serviço em execução continua rodando o código antigo já carregado em memória — o `uvicorn` só passa a usar o código novo quando for reiniciado manualmente):
+
+```bash
+git checkout <BRANCH_OU_COMMIT_DA_CORRECAO>
+git status
+```
+
+- **O que faz:** atualiza os arquivos do working tree para a revisão da correção. **Por quê:** deixar o código pronto no disco sem afetar o processo em execução. **Resultado esperado:** `git status` mostra o working tree limpo na revisão da correção. **Importante:** este passo **não** reinicia o serviço; o processo `uvicorn` ativo segue com o código anterior até o reinício manual (Etapa 14.4).
+
+3. Atualizar dependências, se necessário (a correção **não** adiciona dependências novas — usa apenas a biblioteca padrão para o log estruturado):
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+- **O que faz:** garante que as dependências declaradas estão instaladas. **Por quê:** segurança; nada novo é esperado. **Resultado esperado:** `Requirement already satisfied` para os pacotes já presentes.
+
+### Etapa 14.3 — Apresentar as alterações e pedir confirmação
+
+Antes de reiniciar, revise e **apresente** as mudanças para aprovação:
+
+```bash
+git diff <REVISAO_ANTERIOR> HEAD --stat
+```
+
+- **O que faz:** mostra, por arquivo, o resumo das linhas alteradas entre a versão anterior e a correção. **Por quê:** evidenciar o escopo da mudança a quem aprova a implantação. **Resultado esperado:** a lista inclui os módulos de domínio, consumidores, `main.py`, API, frontend e documentação. **Não prossiga para o reinício sem a confirmação explícita.**
+
+### Etapa 14.4 — Reiniciar o serviço em janela controlada (manual)
+
+Somente após a confirmação, reinicie o serviço manualmente:
+
+```bash
+sudo systemctl restart lab-sqs.service
+sudo systemctl status lab-sqs.service
+journalctl -u lab-sqs.service -n 50 --no-pager
+```
+
+- **O que faz:** reinicia o serviço `systemd` para carregar o código novo e mostra o status e os últimos logs. **Por quê:** aplicar a correção de forma controlada. **Resultado esperado:** status **active (running)** e, nos logs, `Application startup complete`. Os eventos estruturados da correção (ex.: `iteracao_consumidor_falhou`, `consumidor_reiniciado`) aparecem em formato JSON pelo logger `sqs_lab.resiliencia` quando ocorrerem.
+
+> **Rollback:** se algo falhar, volte ao estado anterior com `git checkout $(cat /home/ec2-user/deploy-revisao-anterior.txt)` seguido de `sudo systemctl restart lab-sqs.service`, ou restaure o `.tar.gz` de backup. Nenhum recurso AWS precisa ser tocado no rollback.
+
+### Etapa 14.5 — Ligar/desligar a extensão opt-in de Visibility_Timeout
+
+A extensão de Visibility_Timeout via `ChangeMessageVisibility` é **opt-in e vem desligada por padrão**. Ela é controlada pela **Config_Simulacao** da aplicação (não por atributo de fila) e **nunca** altera os 30 s configurados no Console AWS — age apenas sobre a mensagem recebida.
+
+- **Manter desligada (padrão):** não é preciso fazer nada. Os cenários didáticos de expiração proposital (ex.: processamento de 45 s com Visibility_Timeout de 30 s) continuam demonstrando a reentrega.
+- **Ligar (opcional):** ajuste a Config_Simulacao pelo Dashboard (área de configuração) ou via `PUT /api/config/simulacao`, informando o valor estendido dentro da faixa `[20, 43200]` segundos. A aplicação valida a faixa **antes** de qualquer chamada à AWS; um valor fora da faixa é rejeitado sem efeito colateral.
+- **Permissão IAM:** se ligar a extensão, adicione a ação `sqs:ChangeMessageVisibility` à policy `lab-sqs-policy-minima` (Etapa 6), restrita às quatro filas. Com a flag desligada, essa permissão **não** é necessária.
+
+> **Importante:** ligar a extensão **não** substitui os cenários de expiração — o cenário `duracao_superior_visibility` ignora a extensão de propósito, para que o teste didático de expiração continue válido.
+
+---
+
 ## Parte 7 — Verificação pós-implantação
 
 ### Etapa 15 — Validar que a aplicação e os recursos subiram
@@ -356,6 +453,14 @@ http://<IP_PUBLICO_DA_EC2>:8000/
 
 4. Teste funcional rápido: no Dashboard, envie uma mensagem para a fila Standard e verifique na área de monitoramento que a mensagem é recebida e processada; confirme que apareceram itens na tabela `lab-sqs-historico` do DynamoDB.
 - **Resultado esperado:** a mensagem percorre o ciclo (enviada → recebida → processada) e o histórico registra os eventos.
+
+5. Validar a saúde dos consumidores (correção de resiliência):
+
+```
+http://<IP_PUBLICO_DA_EC2>:8000/api/consumidores/saude
+```
+
+- **O que valida:** o endpoint inspeciona apenas o estado em memória dos slots (sem tocar na AWS) e reporta cada consumidor. **Resultado esperado:** JSON com `"iniciados": true`, `"algum_morto": false`, `"algum_degradado": false` e a lista `consumidores` com `"vivo": true` para os slots `standard` e `fifo`. Um consumidor com `"vivo": false` ou `"degradado": true` indica uma thread encerrada/em falha persistente, que o Dashboard sinaliza com a faixa amarela.
 
 > **Tratamento de falha (Parte 7):** `saudavel: false` indica recurso ausente/inacessível — corrija o recurso indicado no Console AWS e recarregue. Dashboard inacessível pelo navegador costuma ser regra de entrada da porta `8000` no Security Group ou origem (IP) não autorizada.
 
@@ -421,6 +526,7 @@ Observações de custo:
 12. Clonar o código.
 13. Criar o `venv` e instalar dependências.
 14. Iniciar a aplicação (`uvicorn app.main:app`) e opcionalmente como serviço `systemd`.
-15. Verificar pós-implantação (`/api/saude`, Dashboard, Console AWS).
+14.1. (Correção) Fazer backup/versionamento, obter a correção sem reiniciar, apresentar as alterações, reiniciar manualmente em janela controlada e, opcionalmente, ligar/desligar a extensão de Visibility_Timeout.
+15. Verificar pós-implantação (`/api/saude`, `/api/consumidores/saude`, Dashboard, Console AWS).
 16. Excluir todos os recursos na ordem indicada.
 17. Confirmar ausência de recursos remanescentes.

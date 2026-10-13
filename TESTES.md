@@ -1,6 +1,6 @@
 # Roteiro de Testes — Laboratório Amazon SQS (`aws-sqs-lab`)
 
-Este documento descreve o **roteiro dos seis testes de laboratório** que validam, de ponta a ponta, o comportamento do laboratório didático de Amazon SQS sobre serviços reais da AWS na região `us-east-1`. Cada teste é executado a partir do **Dashboard** (pt-BR) servido pela instância EC2 e observado pela área de **Monitoramento**, pelo **Histórico detalhado** de cada mensagem e pela **Visão geral** (estatísticas por fluxo).
+Este documento descreve o **roteiro dos testes de laboratório** que validam, de ponta a ponta, o comportamento do laboratório didático de Amazon SQS sobre serviços reais da AWS na região `us-east-1`. Os **testes 1 a 6** cobrem os comportamentos originais do laboratório; os **testes 7 a 10** cobrem a correção de resiliência dos consumidores (estado "Exclusão não confirmada", endpoint de saúde, faixa de status diferenciada, extensão opt-in de Visibility_Timeout e recuperação de thread encerrada). Cada teste é executado a partir do **Dashboard** (pt-BR) servido pela instância EC2 e observado pela área de **Monitoramento**, pelo **Histórico detalhado** de cada mensagem e pela **Visão geral** (estatísticas por fluxo).
 
 Os testes exercitam a aplicação real: envio via `POST /api/mensagens`, cenários controlados via `POST /api/laboratorio/cenario`, reprocessamento via `POST /api/laboratorio/reprocessar-dlq`, estatísticas via `GET /api/monitoramento` e `GET /api/estatisticas`, e a linha do tempo de cada mensagem via `GET /api/mensagens/{order_id}/historico`.
 
@@ -10,9 +10,11 @@ Os testes exercitam a aplicação real: envio via `POST /api/mensagens`, cenári
 
 - **Fluxos:** `standard` (fila `lab-sqs-standard` + DLQ `lab-sqs-standard-dlq`) e `fifo` (fila `lab-sqs-fifo.fifo` + DLQ `lab-sqs-fifo-dlq.fifo`).
 - **Config_Aplicada** (configurada manualmente no Console AWS, imutável pelo Dashboard): `Visibility_Timeout` = 30 s; `maxReceiveCount` da Redrive_Policy = 2; retenção 4 dias (filas) / 14 dias (DLQs); `Long_Polling` (`WaitTimeSeconds`) = 20 s; `SSE_SQS` habilitado; `Deduplicacao_Por_Conteudo` habilitada nas filas FIFO.
-- **Config_Simulacao** (ajustável no Dashboard): `Tempo_Processamento_Simulado` [0, 300] s (padrão 45 s); quantidade de mensagens [1, 10]; número de instâncias por consumidor [1, 10]; intervalo de atualização [5, 300] s (padrão 10 s; visão geral 1–60 s, padrão 5 s).
+- **Config_Simulacao** (ajustável no Dashboard): `Tempo_Processamento_Simulado` [0, 300] s (padrão 45 s); quantidade de mensagens [1, 10]; número de instâncias por consumidor [1, 10]; intervalo de atualização [5, 300] s (padrão 10 s; visão geral 1–60 s, padrão 5 s). A **extensão opt-in de Visibility_Timeout** (via `ChangeMessageVisibility`) vem **desligada por padrão**; quando ligada, aceita um valor estendido em `[20, 43200]` s e **não** altera os 30 s da fila no Console AWS.
 - **Cenario_Falha** (valores reais do enum `CenarioFalha` em `app/consumidores/processamento.py`): `sucesso`, `excecao_proposital`, `interrupcao`, `duracao_superior_visibility`, `recebimento_repetido`, `encaminhar_dlq`.
-- **Evento_Observado × Evento_Inferido:** eventos confirmados pela AWS (ex.: `enviada`, `recebida`, `excluida`, `encaminhada_dlq`) aparecem como **Observado**; deduções da aplicação (ex.: `provavel_expiracao_visibility`) aparecem como **Inferido**. O Dashboard exibe o indicador por evento sem exigir interação.
+- **Evento_Observado × Evento_Inferido:** eventos confirmados pela AWS (ex.: `enviada`, `recebida`, `excluida`, `encaminhada_dlq`, `exclusao_nao_confirmada`) aparecem como **Observado**; deduções da aplicação (ex.: `provavel_expiracao_visibility`) aparecem como **Inferido**. O Dashboard exibe o indicador por evento sem exigir interação.
+- **Estados derivados:** `Aguardando`, `Recebida`, `Em processamento`, `Processada` (terminal), `Exclusão não confirmada` (não terminal — negócio concluído mas `DeleteMessage` falhou), `Falha`, `Aguardando nova tentativa` e `Encaminhada para DLQ` (terminal).
+- **Faixa de status global do Dashboard (precedência):** API indisponível (vermelha) > consumidor em falha (amarela) > timeout de cálculo (laranja) > sucesso.
 - **Pré-requisitos comuns a todos os testes** (não repetidos em cada roteiro, salvo quando específicos):
   - As 4 filas SQS, a Tabela_Historico, a IAM_Role_EC2 e a instância EC2 criadas manualmente conforme `IMPLANTACAO.md`.
   - A aplicação em execução na EC2 (API_Backend + consumidores + Dashboard) com a verificação de inicialização (`GET /api/saude`) bem-sucedida.
@@ -337,6 +339,213 @@ Aprovado quando ao menos **1 mensagem reaparecer** na fila após o consumidor en
 
 ---
 
+## Teste 7 — `DeleteMessage` falho vira "Exclusão não confirmada" (consumidor segue vivo)
+
+**1. Objetivo**
+Demonstrar que, quando o `DeleteMessage` falha por `ReceiptHandle` expirado (processamento mais longo que o Visibility_Timeout, no fluxo FIFO, com a extensão opt-in **desligada**), o consumidor **não** encerra: a mensagem recebe o estado **Exclusão não confirmada**, o histórico registra o evento `exclusao_nao_confirmada` com o erro original da AWS, e **nenhum** evento `processada`/`excluida` é gravado para aquela tentativa.
+
+**2. Pré-requisitos**
+- Pré-requisitos comuns satisfeitos.
+- Correção de resiliência implantada (Parte 6.1 do `IMPLANTACAO.md`).
+- Extensão opt-in de Visibility_Timeout **desligada** (padrão) na Config_Simulacao.
+- `Visibility_Timeout` da fila `lab-sqs-fifo.fifo` confirmado em **30 segundos** (Config_Aplicada).
+- 1 instância ativa de `Consumidor_FIFO`.
+
+**3. Configuração**
+- Fluxo: `fifo`, `MessageGroupId` = `grupo-teste7`.
+- Quantidade: 3 mensagens, `order_id` = `teste7-fifo-0001` a `teste7-fifo-0003`.
+- `Cenario_Falha`: `sucesso` (o negócio conclui; a falha é apenas na exclusão por expiração do prazo).
+- `Tempo_Processamento_Simulado`: **45 s** (maior que o Visibility_Timeout de 30 s).
+
+**4. Passo a passo numerado**
+1. Confirme, na **Visão geral**, que o `Visibility_Timeout` exibido é **30 s** (Config_Aplicada) e que a extensão de Visibility_Timeout está **desligada**.
+2. Na área **Envio de mensagens**, selecione a fila **FIFO**, informe `MessageGroupId` = `grupo-teste7` e envie as 3 mensagens com `Cenario_Falha` = `sucesso` e `Tempo_Processamento_Simulado` = 45 s.
+3. No **Monitoramento**, acompanhe a primeira mensagem do grupo entrar em **Em processamento**.
+4. Após ~45 s (quando o consumidor tenta o `DeleteMessage` com o `ReceiptHandle` já expirado), observe o estado passar a **Exclusão não confirmada** (badge próprio, distinto de "Processada" e de "Falha").
+5. Abra o **Histórico detalhado** da mensagem e verifique o evento `exclusao_nao_confirmada` (Observado), com o erro original da AWS no detalhe, e a **ausência** de `processada`/`excluida` naquela tentativa.
+6. Confirme no endpoint `GET /api/consumidores/saude` (ou pela faixa de status) que o `Consumidor_FIFO` continua **vivo** (`"vivo": true`, `"degradado": false`).
+7. Na **Visão geral**, confirme o incremento do contador **Exclusão não confirmada** do fluxo FIFO, separado do contador "Com falha".
+
+**5. Resultado esperado**
+- A mensagem fica no estado **Exclusão não confirmada** (não terminal), com o evento `exclusao_nao_confirmada` registrado e o erro original preservado.
+- **Nenhum** evento `processada` ou `excluida` é gravado para a tentativa cujo `DeleteMessage` falhou.
+- O `Consumidor_FIFO` permanece vivo e continua consumindo (a thread não morre).
+- O contador "Exclusão não confirmada" do fluxo FIFO incrementa, sem contar como "Com falha".
+
+**6. Evidências (o que capturar)**
+- Tela de **Monitoramento** com a mensagem no estado **Exclusão não confirmada**.
+- Tela de **Histórico detalhado** com o evento `exclusao_nao_confirmada` (Observado) e o erro original.
+- Resposta de `GET /api/consumidores/saude` mostrando o `Consumidor_FIFO` vivo.
+- Tela da **Visão geral** com o contador "Exclusão não confirmada" do fluxo FIFO incrementado.
+
+**7. Resultado real** _(a preencher pelo executor após a execução na AWS)_
+
+```
+Data/hora da execução:
+Estado final observado no Monitoramento:
+Evento exclusao_nao_confirmada registrado (origem/erro):
+Houve processada/excluida nessa tentativa? (sim/não):
+Consumidor_FIFO vivo após a falha? (sim/não):
+Contador "Exclusão não confirmada" (antes/depois):
+Observações:
+```
+
+**8. Critério de aprovação**
+Aprovado quando a mensagem atingir o estado **Exclusão não confirmada** com o evento `exclusao_nao_confirmada` Observado (sem `processada`/`excluida`), o `Consumidor_FIFO` permanecer vivo e o contador dedicado incrementar sem ser contado como falha.
+
+---
+
+## Teste 8 — Reentrega sem duplicar operação de negócio
+
+**1. Objetivo**
+Validar que, após uma "Exclusão não confirmada", uma reentrega com `ReceiptHandle` novo e válido reprocessa a mensagem e **confirma** a exclusão, sem duplicar a operação de negócio — ou seja, ao final há **exatamente um** `processada`/`excluida` por `order_id`.
+
+**2. Pré-requisitos**
+- Pré-requisitos comuns satisfeitos; correção de resiliência implantada.
+- Extensão opt-in de Visibility_Timeout **desligada**.
+- Para observar a convergência em uma única reentrega, use um `Tempo_Processamento_Simulado` **menor** que o Visibility_Timeout na reentrega (ver Configuração).
+
+**3. Configuração**
+- Fluxo: `fifo`, `MessageGroupId` = `grupo-teste8`, `order_id` = `teste8-fifo-0001`.
+- 1ª tentativa: `Cenario_Falha` = `sucesso`, `Tempo_Processamento_Simulado` = **45 s** (força a expiração e a "Exclusão não confirmada").
+- Reentrega: processamento com `Tempo_Processamento_Simulado` **menor que 30 s** (ex.: 10 s), de modo que o `DeleteMessage` ocorra dentro do prazo e seja confirmado.
+
+**4. Passo a passo numerado**
+1. Envie `teste8-fifo-0001` ao grupo `grupo-teste8` com `sucesso` e 45 s, reproduzindo o Teste 7 (a mensagem vai para **Exclusão não confirmada**).
+2. Ajuste a Config_Simulacao para `Tempo_Processamento_Simulado` = 10 s (menor que o Visibility_Timeout), de modo que a próxima reentrega conclua a exclusão dentro do prazo.
+3. Aguarde a reentrega (após a expiração do Visibility_Timeout) com o `ApproximateReceiveCount` incrementado.
+4. No **Monitoramento**, observe o estado transitar de **Exclusão não confirmada** para **Em processamento** e, ao final, **Processada**.
+5. Abra o **Histórico detalhado** e verifique a linha do tempo: `exclusao_nao_confirmada` (1ª tentativa) → `recebida`/`processamento_iniciado` (reentrega) → `processada` → `excluida`.
+6. Confirme que há **exatamente um** `processada` e **um** `excluida` no total para o `order_id`.
+
+**5. Resultado esperado**
+- A reentrega não é bloqueada pela idempotência (não há `processada` prévio), então a mensagem é reprocessada.
+- A exclusão é confirmada na reentrega (handle válido), gravando `processada` + `excluida`.
+- Ao final, o estado derivado é **Processada** e existe **exatamente um** par `processada`/`excluida` — a operação de negócio não é duplicada em sentido observável.
+
+**6. Evidências (o que capturar)**
+- Tela de **Histórico detalhado** com a sequência completa (`exclusao_nao_confirmada` → reentrega → `processada` → `excluida`).
+- Tela de **Monitoramento** com o estado final **Processada** e `Tentativas` ≥ 2.
+- Contagem evidenciando um único `processada`/`excluida`.
+
+**7. Resultado real** _(a preencher pelo executor após a execução na AWS)_
+
+```
+Data/hora da execução:
+Tentativas até a confirmação da exclusão:
+Sequência de eventos observada:
+Nº de processada / nº de excluida no total:
+Estado final observado:
+Observações:
+```
+
+**8. Critério de aprovação**
+Aprovado quando, após uma "Exclusão não confirmada", a reentrega concluir com estado final **Processada** e houver **exatamente um** `processada` e **um** `excluida` para o `order_id`.
+
+---
+
+## Teste 9 — Extensão opt-in de Visibility_Timeout (desligada × ligada)
+
+**1. Objetivo**
+Demonstrar os dois comportamentos didáticos do cenário de 45 s com Visibility_Timeout de 30 s: com a extensão **desligada** (padrão), a expiração acontece e gera "Exclusão não confirmada"/reentrega; com a extensão **ligada**, o prazo é renovado via `ChangeMessageVisibility` e a mensagem é excluída na primeira tentativa — **sem** alterar os 30 s configurados no Console AWS.
+
+**2. Pré-requisitos**
+- Pré-requisitos comuns satisfeitos; correção de resiliência implantada.
+- Permissão `sqs:ChangeMessageVisibility` adicionada à IAM Role **apenas** para a parte com a extensão ligada (ver `IMPLANTACAO.md`, Etapa 14.5).
+- `Visibility_Timeout` da fila mantido em **30 s** (não alterar no Console).
+
+**3. Configuração**
+- Fluxo: `fifo`, `MessageGroupId` = `grupo-teste9`.
+- `Cenario_Falha`: `sucesso`, `Tempo_Processamento_Simulado` = **45 s** em ambas as partes.
+- Parte A: extensão **desligada** (padrão), `order_id` = `teste9-off-0001`.
+- Parte B: extensão **ligada** com valor estendido dentro de `[20, 43200]` s (ex.: 60 s), `order_id` = `teste9-on-0001`.
+
+**4. Passo a passo numerado**
+1. **Parte A (desligada):** confirme que a extensão está desligada; envie `teste9-off-0001` com 45 s. Observe no **Monitoramento** o estado chegar a **Exclusão não confirmada** (como no Teste 7) e a mensagem ser reentregue.
+2. Confirme no Console AWS (SQS → fila FIFO) que o `Visibility_Timeout` da fila **permanece 30 s**.
+3. **Parte B (ligada):** ligue a extensão na Config_Simulacao (ou via `PUT /api/config/simulacao`) com um valor estendido válido; envie `teste9-on-0001` com 45 s.
+4. No **Monitoramento**, observe a mensagem permanecer **Em processamento** além dos 30 s (o prazo é renovado em segundo plano) e terminar em **Processada** na **primeira** tentativa, com `excluida` registrado.
+5. Abra o **Histórico detalhado** de ambas: a Parte A tem `exclusao_nao_confirmada` seguido de reentrega; a Parte B tem `recebida` → `processamento_iniciado` → `processada` → `excluida` sem expiração.
+6. Confirme novamente no Console AWS que o `Visibility_Timeout` da fila continua **30 s** após a Parte B.
+7. **Importante:** ao concluir, **desligue** a extensão para preservar o comportamento didático padrão nos demais testes.
+
+**5. Resultado esperado**
+- **Parte A:** o cenário de 45 s gera **Exclusão não confirmada** e reentrega (expiração proposital preservada).
+- **Parte B:** com a extensão ligada, a mensagem é processada e excluída na primeira tentativa (`Processada`), sem reentrega.
+- Em ambas as partes, o `Visibility_Timeout` da fila no Console permanece **30 s** — a extensão age apenas sobre a mensagem recebida.
+
+**6. Evidências (o que capturar)**
+- Parte A: **Histórico** com `exclusao_nao_confirmada` + reentrega.
+- Parte B: **Histórico** com `processada`/`excluida` na primeira tentativa, sem expiração.
+- Capturas do Console AWS mostrando o `Visibility_Timeout` da fila em **30 s** antes e depois.
+
+**7. Resultado real** _(a preencher pelo executor após a execução na AWS)_
+
+```
+Data/hora da execução:
+Parte A — estado final / houve reentrega? (sim/não):
+Parte B — estado final / excluída na 1ª tentativa? (sim/não):
+Visibility_Timeout da fila no Console (antes/depois): 30 s / 30 s
+Extensão desligada ao final? (sim/não):
+Observações:
+```
+
+**8. Critério de aprovação**
+Aprovado quando a Parte A demonstrar a expiração/reentrega com a extensão desligada e a Parte B demonstrar a exclusão na primeira tentativa com a extensão ligada, **sem** que o `Visibility_Timeout` da fila no Console AWS seja alterado em nenhum momento.
+
+---
+
+## Teste 10 — Recuperação de consumidor encerrado por erro (supervisão por slots)
+
+**1. Objetivo**
+Validar que, se a thread de um consumidor encerrar inesperadamente, a supervisão por slots recria **uma** reposição com um novo `consumer_id` (sem duplicar consumidores), e que o Dashboard sinaliza a falha com a faixa amarela enquanto o endpoint de saúde reflete o estado real.
+
+**2. Pré-requisitos**
+- Pré-requisitos comuns satisfeitos; correção de resiliência implantada.
+- Acesso ao endpoint `GET /api/consumidores/saude` e à faixa de status do Dashboard.
+
+> **Observação:** no uso normal, a guarda por iteração impede que falhas pontuais encerrem a thread; este teste observa o mecanismo de supervisão quando uma thread encerra de fato. A recuperação automatizada é validada pela suíte (`test_main_composicao.py`); este roteiro valida a observabilidade pelo Dashboard/endpoint.
+
+**3. Configuração**
+- Fluxo: ambos (standard e fifo).
+- Nenhum parâmetro de fila é alterado; nenhum recurso AWS é tocado.
+
+**4. Passo a passo numerado**
+1. Com a aplicação em execução, consulte `GET /api/consumidores/saude` e registre o estado inicial (todos `"vivo": true`, `"reinicios": 0`).
+2. Observe a faixa de status global do Dashboard em condição normal (sucesso, sem cor de alerta).
+3. Acompanhe a aplicação durante a operação com cenários de falha (Testes 2, 3 e 7). Se, por qualquer motivo, uma thread de consumidor encerrar, a thread supervisora recria o slot em até ~`INTERVALO_SUPERVISAO_SEGUNDOS` (5 s) com um novo `consumer_id`.
+4. Consulte novamente `GET /api/consumidores/saude`: enquanto o slot está morto, `"algum_morto": true`; após a recriação, o consumidor volta a `"vivo": true` com `"reinicios"` incrementado e um `consumer_id` diferente do anterior.
+5. Observe a **faixa amarela** no Dashboard enquanto houver `algum_morto`/`algum_degradado`, com o texto identificando o consumidor afetado.
+6. Confirme que **não** há consumidores duplicados: o número de slots por tipo permanece o configurado (não cresce a cada recriação).
+7. (Opcional) Se um slot exceder o teto de reinícios na janela, confirme que ele é marcado `"degradado": true` e para de reiniciar, com o log `consumidor_em_falha_persistente` (ERROR) no `journalctl`.
+
+**5. Resultado esperado**
+- Uma thread encerrada é reposta por **exatamente uma** nova thread no mesmo slot, com `consumer_id` novo e `reinicios` incrementado — sem duplicar consumidores.
+- O endpoint de saúde reflete `vivo`/`degradado`/`reinicios` reais; a faixa amarela aparece enquanto houver consumidor morto/degradado e desaparece quando a saúde normaliza.
+- Nenhum recurso AWS é alterado e o encerramento da aplicação (quando ocorrer) é limpo (a supervisora encerra antes dos slots).
+
+**6. Evidências (o que capturar)**
+- Respostas de `GET /api/consumidores/saude` antes, durante (slot morto) e depois (reposto) — evidenciando o novo `consumer_id` e `reinicios` incrementado.
+- Captura da **faixa amarela** com o texto do consumidor afetado.
+- Trecho do `journalctl` com `consumidor_reiniciado` (WARNING) e, se aplicável, `consumidor_em_falha_persistente` (ERROR).
+
+**7. Resultado real** _(a preencher pelo executor após a execução na AWS)_
+
+```
+Data/hora da execução:
+consumer_id antes / depois da recriação:
+reinicios antes / depois:
+Faixa amarela observada no Dashboard? (sim/não):
+Houve duplicação de consumidores? (sim/não):
+Algum slot marcado como degradado? (sim/não):
+Observações:
+```
+
+**8. Critério de aprovação**
+Aprovado quando uma thread encerrada for reposta por **exatamente uma** nova thread (novo `consumer_id`, `reinicios` incrementado), sem duplicar consumidores, com o endpoint de saúde e a faixa amarela refletindo o estado real, e sem alterar nenhum recurso AWS.
+
+---
+
 ## Resumo de rastreabilidade
 
 | Teste | Comportamento validado | Endpoints/áreas do Dashboard | Config_Aplicada relevante |
@@ -347,5 +556,9 @@ Aprovado quando ao menos **1 mensagem reaparecer** na fila após o consumidor en
 | 4. Ordenação FIFO | Ordem preservada no grupo | Envio FIFO, comparação por `MessageGroupId`, Histórico | `Deduplicacao_Por_Conteudo` |
 | 5. Concorrência (≥ 2) | Um processamento por mensagem | Instâncias (`PUT /api/consumidores/standard/instancias`), Monitoramento, Visão geral | `Visibility_Timeout` = 30 s |
 | 6. Recuperação | Reentrega + reprocessamento de DLQ | Laboratório (`cenario: interrupcao`, `POST /api/laboratorio/reprocessar-dlq`), Monitoramento, Histórico | `Visibility_Timeout` = 30 s; `maxReceiveCount` = 2 |
+| 7. Exclusão não confirmada | `DeleteMessage` falho vira estado não terminal; consumidor segue vivo | Envio FIFO (45 s), Monitoramento, Histórico, `GET /api/consumidores/saude`, Visão geral | `Visibility_Timeout` = 30 s; extensão opt-in desligada |
+| 8. Reentrega sem duplicar | Reentrega confirma exclusão; um único `processada`/`excluida` | Monitoramento, Histórico | `Visibility_Timeout` = 30 s; idempotência por `order_id` |
+| 9. Extensão opt-in de Visibility_Timeout | Expiração (desligada) × mitigação (ligada), sem alterar os 30 s da fila | Config_Simulacao / `PUT /api/config/simulacao`, Monitoramento, Histórico, Console AWS | `Visibility_Timeout` = 30 s (inalterado); extensão `[20, 43200]` s |
+| 10. Recuperação de consumidor | Supervisão recria slot morto sem duplicar; faixa amarela | `GET /api/consumidores/saude`, faixa de status, `journalctl` | `INTERVALO_SUPERVISAO_SEGUNDOS` = 5; `MAX_REINICIOS_JANELA` = 5 |
 
-> **Lembrete de completude:** este roteiro só é considerado completo se os **seis testes** estiverem presentes e **cada um** contiver os **8 campos obrigatórios** (objetivo, pré-requisitos, configuração, passo a passo numerado, resultado esperado, evidências, resultado real e critério de aprovação). O campo **"Resultado real"** deve ser preenchido pelo executor com os dados efetivamente obtidos na execução contra a AWS — sem valores estimados, inventados ou presumidos.
+> **Lembrete de completude:** este roteiro só é considerado completo se os **dez testes** estiverem presentes e **cada um** contiver os **8 campos obrigatórios** (objetivo, pré-requisitos, configuração, passo a passo numerado, resultado esperado, evidências, resultado real e critério de aprovação). O campo **"Resultado real"** deve ser preenchido pelo executor com os dados efetivamente obtidos na execução contra a AWS — sem valores estimados, inventados ou presumidos.
