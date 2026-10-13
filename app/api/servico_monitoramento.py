@@ -188,6 +188,7 @@ def _fluxo_para_saida(fluxo: str, estat: EstatisticasFluxo) -> EstatisticasFluxo
         processadas=estat.processadas,
         com_falha=estat.com_falha,
         encaminhadas_dlq=estat.encaminhadas_dlq,
+        exclusao_nao_confirmada=estat.exclusao_nao_confirmada,
         recebidas_por_consumidor=recebidas,
     )
 

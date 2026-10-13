@@ -339,6 +339,15 @@ class EstatisticasFluxoSaida(BaseModel):
     encaminhadas_dlq: int = Field(
         ..., ge=0, description="Mensagens encaminhadas para a DLQ (Req. 3.6)."
     )
+    exclusao_nao_confirmada: int = Field(
+        0,
+        ge=0,
+        description=(
+            "Mensagens cujo processamento terminou, mas o DeleteMessage não foi "
+            "confirmado (ex.: ReceiptHandle expirado). Default 0 para não quebrar "
+            "serializações existentes."
+        ),
+    )
     recebidas_por_consumidor: list[RecebidasPorConsumidor] = Field(
         default_factory=list,
         description="Recebimentos por consumidor, identificando cada um (Req. 3.7).",
@@ -708,6 +717,60 @@ class RespostaInstancias(BaseModel):
     )
     mensagem: str = Field(
         "", description="Mensagem em pt-BR; indica a faixa válida quando rejeitado."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Saúde dos consumidores (frente D — supervisão em memória)
+# ---------------------------------------------------------------------------
+class ConsumidorSaude(BaseModel):
+    """Situação de uma única instância (slot) de consumidor, lida da memória.
+
+    Reflete o estado observado pelo :class:`GerenciadorConsumidores` sem tocar na
+    AWS: se a thread está viva, se o slot foi marcado como degradado (falha
+    persistente) e quantos reinícios já ocorreram.
+    """
+
+    tipo: str = Field(..., description="Tipo do consumidor: 'standard' ou 'fifo'.")
+    consumer_id: str = Field(
+        ..., description="Identificador da instância atualmente associada ao slot."
+    )
+    vivo: bool = Field(
+        ..., description="True se a thread do consumidor está viva no momento."
+    )
+    degradado: bool = Field(
+        ...,
+        description="True se o slot foi marcado como falha persistente (parou de reiniciar).",
+    )
+    reinicios: int = Field(
+        ..., ge=0, description="Total de reinícios já realizados para o slot."
+    )
+
+
+class RespostaSaudeConsumidores(BaseModel):
+    """Resposta do GET /api/consumidores/saude (frente D).
+
+    Expõe a saúde dos consumidores supervisionados em memória, sem consultar a AWS.
+    Quando os consumidores não foram iniciados (ou não há gerenciador), ``iniciados``
+    é ``False`` e ``consumidores`` é vazia. Os agregados ``algum_morto`` e
+    ``algum_degradado`` resumem o estado para o Dashboard destacar problemas.
+    """
+
+    iniciados: bool = Field(
+        ...,
+        description="True se há um gerenciador de consumidores ativo com slots.",
+    )
+    algum_morto: bool = Field(
+        ...,
+        description="True se ao menos um slot não está vivo (thread encerrada).",
+    )
+    algum_degradado: bool = Field(
+        ...,
+        description="True se ao menos um slot foi marcado como falha persistente.",
+    )
+    consumidores: list[ConsumidorSaude] = Field(
+        default_factory=list,
+        description="Situação de cada slot de consumidor (vazia quando não iniciados).",
     )
 
 

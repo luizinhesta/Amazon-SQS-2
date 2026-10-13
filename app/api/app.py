@@ -60,6 +60,7 @@ from app.api.esquemas import (
     RespostaMonitoramento,
     RespostaReprocessarDlq,
     RespostaSaude,
+    RespostaSaudeConsumidores,
     ResultadoAjusteParametro,
     ROTULO_CONFIG_APLICADA,
     ROTULO_CONFIG_SIMULACAO,
@@ -77,6 +78,7 @@ from app.api.servico_monitoramento import (
     obter_estatisticas,
     obter_monitoramento,
 )
+from app.api.servico_saude_consumidores import obter_saude_consumidores
 from app.dominio import constantes as c
 from app.seguranca.autenticacao import ControladorAutenticacao
 from app.verificacao_inicializacao import (
@@ -123,6 +125,12 @@ def _controlador_autenticacao(request: Request) -> ControladorAutenticacao:
 
 def _credenciais_dashboard(request: Request) -> CredenciaisDashboard:
     return request.app.state.credenciais_dashboard
+
+
+def _gerenciador_consumidores(request: Request) -> Optional[object]:
+    # Definido na composição da aplicação (app.main.compor_aplicacao); pode ser None
+    # quando os consumidores não foram iniciados ou nem o atributo existe.
+    return getattr(request.app.state, "gerenciador_consumidores", None)
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +363,7 @@ def criar_roteador_estatisticas_monitoramento() -> APIRouter:
     """Cria o APIRouter com os endpoints de estatísticas e monitoramento (Tarefa 15.5).
 
     Ambos derivam o Estado das mensagens a partir do log de eventos da
-    Tabela_Historico (Req. 5.9, 5.10) e aplicam um timeout de 3 s, retornando uma
+    Tabela_Historico (Req. 5.9, 5.10) e aplicam um timeout de 10 s, retornando uma
     indicação clara de timeout ao exceder (Req. 14.1-14.4). A lógica fica em
     :mod:`app.api.servico_monitoramento` para manter as rotas finas.
     """
@@ -371,7 +379,7 @@ def criar_roteador_estatisticas_monitoramento() -> APIRouter:
 
         Deriva os contadores (enviadas, disponíveis, em processamento, processadas,
         com falha, encaminhadas para DLQ e recebidas por consumidor) separados e
-        rotulados por fluxo. Ao exceder o limite de 3 s, devolve ``timeout=True`` e
+        rotulados por fluxo. Ao exceder o limite de 10 s, devolve ``timeout=True`` e
         uma mensagem em pt-BR, sem erro bruto.
         """
         return obter_estatisticas(_historico(request))
@@ -387,7 +395,7 @@ def criar_roteador_estatisticas_monitoramento() -> APIRouter:
         Uma linha por mensagem com as colunas ID, Fila, Consumidor, Tentativas,
         Processamento, Estado e Último evento; o Estado é derivado dos eventos. Sem
         mensagens registradas, devolve ``vazio=True`` com indicação em pt-BR
-        (Req. 5.8). Ao exceder o limite de 3 s, devolve ``timeout=True``.
+        (Req. 5.8). Ao exceder o limite de 10 s, devolve ``timeout=True``.
         """
         return obter_monitoramento(_historico(request))
 
@@ -478,6 +486,24 @@ def criar_roteador_laboratorio() -> APIRouter:
 def criar_roteador_consumidores() -> APIRouter:
     """Cria o APIRouter com o endpoint de ajuste de instâncias (Tarefa 15.6)."""
     roteador = APIRouter(prefix="/api/consumidores", tags=["consumidores"])
+
+    # Rota literal registrada ANTES da rota variável '/{tipo}/instancias' para que
+    # 'saude' não seja capturado como um valor de {tipo}. Como os caminhos são
+    # distintos ('/saude' vs '/{tipo}/instancias'), não há conflito de rota.
+    @roteador.get(
+        "/saude",
+        response_model=RespostaSaudeConsumidores,
+        summary="Saúde dos consumidores supervisionados (sem tocar na AWS)",
+    )
+    def obter_saude_consumidores_endpoint(request: Request) -> RespostaSaudeConsumidores:
+        """Retorna a saúde dos consumidores lida do estado em memória (frente D).
+
+        Reflete, por slot, se a thread está viva, se o slot está degradado e quantos
+        reinícios ocorreram, além dos agregados ``algum_morto``/``algum_degradado``.
+        Quando os consumidores não foram iniciados (gerenciador ``None``), devolve
+        ``iniciados=False`` e lista vazia. Nunca chama a AWS e nunca retorna 500.
+        """
+        return obter_saude_consumidores(_gerenciador_consumidores(request))
 
     @roteador.put(
         "/{tipo}/instancias",

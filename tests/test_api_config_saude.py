@@ -273,3 +273,110 @@ def test_ajuste_limites_inclusivos_sao_aceitos() -> None:
 
     corpo = resposta.json()
     assert corpo["aceito"] is True
+
+
+# --- GET /api/consumidores/saude ---------------------------------------------
+# A saúde dos consumidores é lida do estado em memória do GerenciadorConsumidores
+# (método estado_slots()), sem tocar na AWS. Aqui usamos fakes de slot/gerenciador
+# e injetamos o gerenciador em app.state, como faz a composição da aplicação.
+from dataclasses import dataclass
+
+
+@dataclass
+class _SlotFake:
+    tipo: str
+    consumer_id: str
+    vivo: bool
+    degradado: bool
+    reinicios: int
+
+
+class _GerenciadorFake:
+    def __init__(self, slots: list[_SlotFake]) -> None:
+        self._slots = slots
+
+    def estado_slots(self) -> list[_SlotFake]:
+        return list(self._slots)
+
+
+def test_saude_consumidores_sem_gerenciador_retorna_nao_iniciados() -> None:
+    cliente = _criar_cliente()
+    # Em create_app não há atributo gerenciador_consumidores; o endpoint trata como None.
+
+    resposta = cliente.get("/api/consumidores/saude")
+
+    assert resposta.status_code == 200
+    corpo = resposta.json()
+    assert corpo["iniciados"] is False
+    assert corpo["algum_morto"] is False
+    assert corpo["algum_degradado"] is False
+    assert corpo["consumidores"] == []
+
+
+def test_saude_consumidores_gerenciador_none_retorna_nao_iniciados() -> None:
+    cliente = _criar_cliente()
+    cliente.app.state.gerenciador_consumidores = None
+
+    corpo = cliente.get("/api/consumidores/saude").json()
+
+    assert corpo["iniciados"] is False
+    assert corpo["consumidores"] == []
+
+
+def test_saude_consumidores_lista_slots_e_agrega_morto_e_degradado() -> None:
+    cliente = _criar_cliente()
+    cliente.app.state.gerenciador_consumidores = _GerenciadorFake(
+        [
+            _SlotFake("standard", "consumidor-standard-1", True, False, 0),
+            _SlotFake("fifo", "consumidor-fifo-1", False, False, 2),
+            _SlotFake("fifo", "consumidor-fifo-2", True, True, 5),
+        ]
+    )
+
+    resposta = cliente.get("/api/consumidores/saude")
+
+    assert resposta.status_code == 200
+    corpo = resposta.json()
+    assert corpo["iniciados"] is True
+    # Há um slot não vivo (fifo-1) e um degradado (fifo-2).
+    assert corpo["algum_morto"] is True
+    assert corpo["algum_degradado"] is True
+    assert len(corpo["consumidores"]) == 3
+    primeiro = corpo["consumidores"][0]
+    assert primeiro["tipo"] == "standard"
+    assert primeiro["consumer_id"] == "consumidor-standard-1"
+    assert primeiro["vivo"] is True
+    assert primeiro["degradado"] is False
+    assert primeiro["reinicios"] == 0
+
+
+def test_saude_consumidores_todos_vivos_sem_degradacao() -> None:
+    cliente = _criar_cliente()
+    cliente.app.state.gerenciador_consumidores = _GerenciadorFake(
+        [
+            _SlotFake("standard", "consumidor-standard-1", True, False, 0),
+            _SlotFake("fifo", "consumidor-fifo-1", True, False, 0),
+        ]
+    )
+
+    corpo = cliente.get("/api/consumidores/saude").json()
+
+    assert corpo["iniciados"] is True
+    assert corpo["algum_morto"] is False
+    assert corpo["algum_degradado"] is False
+    assert len(corpo["consumidores"]) == 2
+
+
+def test_saude_consumidores_nao_conflita_com_rota_de_instancias() -> None:
+    # A rota literal '/saude' não deve ser capturada por '/{tipo}/instancias'.
+    cliente = _criar_cliente()
+
+    saude = cliente.get("/api/consumidores/saude")
+    instancias = cliente.put(
+        "/api/consumidores/standard/instancias", json={"instancias": 3}
+    )
+
+    assert saude.status_code == 200
+    assert "iniciados" in saude.json()
+    assert instancias.status_code == 200
+    assert instancias.json()["tipo"] == "standard"
