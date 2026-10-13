@@ -1,0 +1,13 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "severity": "NIT",
+      "title": "Rationale factualmente incorreto na Decisao 1 (seletor de order_id do Standard)",
+      "location": "design.md secao 'Testabilidade' > 'Corpo das mensagens fake nos testes de consumidor' e resposta ao Finding 1",
+      "problem": "O design afirma que o ConsumidorStandard deriva order_id de payload.order_id sem fallback de corpo cru (ao contrario do FIFO) e que sem JSON com order_id a idempotencia decidiria REJEITAR_VALIDACAO. Verifiquei app/consumidores/payload_mensagem.py::extrair_payload: ha fallback documentado que trata o corpo cru como order_id (fallback = PayloadMensagem(order_id=body or None)). O Standard usa esse extrair_payload, logo um corpo cru viraria order_id e a idempotencia decidiria PROCESSAR, nao REJEITAR_VALIDACAO. Ambos os consumidores tem fallback de corpo cru.",
+      "fix": "Corrigir a frase para refletir o codigo: usar corpo JSON de contrato por ser o formato real do produtor e por carregar cenario/processing_seconds que os testes 4/5/10 precisam; remover a afirmacao de que o Standard nao tem fallback e de que cairia em REJEITAR_VALIDACAO. A decisao (usar corpo JSON com order_id explicito) permanece valida e correta; apenas o rationale esta errado, por isso NIT e nao bloqueia."
+    }
+  ],
+  "reviewDoc": "c:\\github\\amazon-sqs2\\.worktrees\\fix-fifo-resiliencia\\.agents\\tasks\\fifo-resiliencia\\design-review.md"
+}

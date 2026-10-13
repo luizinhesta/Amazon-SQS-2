@@ -1,0 +1,28 @@
+{
+  "id": "FEAT-001",
+  "type": "feat",
+  "description": "Base de dominio e observabilidade (frente A, parte 1): novo EventType.EXCLUSAO_NAO_CONFIRMADA e Estado.EXCLUSAO_NAO_CONFIRMADA (nao terminal), seu mapeamento de origem obrigatorio no classificador, as novas constantes de supervisao/heartbeat, a reflexao do novo estado no StateDeriver (precedencia e reentrega), a contagem por fluxo no agregador e o modulo de logging estruturado. Independente das demais FEATs quanto a arquivos, mas e pre-requisito de todas (define o tipo/estado/constantes/log usados adiante).",
+  "status": "completed",
+  "steps": [
+    "Em app/dominio/tipos.py adicionar EventType.EXCLUSAO_NAO_CONFIRMADA = 'exclusao_nao_confirmada' e Estado.EXCLUSAO_NAO_CONFIRMADA = 'Exclusão não confirmada'. NAO adicionar o novo Estado a ESTADOS_TERMINAIS (mantem {PROCESSADA, ENCAMINHADA_DLQ}). NAO adicionar entrada em ORIGEM_OBRIGATORIA_POR_TIPO. ESTADOS_PERMITIDOS=frozenset(Estado) absorve o novo estado sozinho.",
+    "Em app/dominio/classificador_origem.py adicionar EventType.EXCLUSAO_NAO_CONFIRMADA: EventSource.OBSERVADO ao dicionario ORIGEM_POR_TIPO (obrigatorio: o assert de import 'set(ORIGEM_POR_TIPO) == set(EventType)' quebra sem isso).",
+    "Em app/dominio/constantes.py adicionar INTERVALO_SUPERVISAO_SEGUNDOS=5, MAX_REINICIOS_JANELA=5, JANELA_REINICIOS_SEGUNDOS=60, HEARTBEAT_VISIBILITY_SEGUNDOS=20. NAO alterar VISIBILITY_TIMEOUT_SEGUNDOS (30) nem MAX_RECEIVE_COUNT (2).",
+    "Em app/dominio/state_deriver.py adicionar, dentro do laco reversed(lista), o ramo 'if tipo is EventType.EXCLUSAO_NAO_CONFIRMADA: return Estado.EXCLUSAO_NAO_CONFIRMADA', posicionado junto aos demais desfechos (apos os ramos de PROCESSAMENTO_INICIADO/FALHA; a ordem textual nao importa pois reversed garante que o evento cronologicamente mais recente vence). DLQ e PROCESSADA continuam resolvidos antes do laco. Documentar no docstring que o estado e nao terminal e que numa reentrega ativa um processamento_iniciado/recebida posterior o sobrepoe (retorna EM_PROCESSAMENTO/RECEBIDA).",
+    "Em app/dominio/agregador_estatisticas.py adicionar o campo EstatisticasFluxo.exclusao_nao_confirmada: int = 0 e, no bloco de derivacao por mensagem, o ramo 'elif estado is Estado.EXCLUSAO_NAO_CONFIRMADA: destino.exclusao_nao_confirmada += 1' (nao conta como processadas nem com_falha).",
+    "Criar o pacote app/observabilidade/ com __init__.py e log_estruturado.py expondo log_evento(nivel: int, evento: str, **campos) -> None que emite uma linha JSON via logging.getLogger('sqs_lab.resiliencia') usando json.dumps({'evento': evento, **campos}, ensure_ascii=False, default=str)."
+  ],
+  "acceptance_criteria": [
+    "O import de app.dominio.classificador_origem nao levanta AssertionError (o novo EventType esta mapeado).",
+    "Estado.EXCLUSAO_NAO_CONFIRMADA NAO pertence a ESTADOS_TERMINAIS e pertence a ESTADOS_PERMITIDOS.",
+    "derivar_estado retorna Estado.EXCLUSAO_NAO_CONFIRMADA quando esse evento e o desfecho mais recente, e EM_PROCESSAMENTO quando ha reentrega ativa posterior; DLQ e PROCESSADA tem precedencia.",
+    "EstatisticasFluxo possui o campo exclusao_nao_confirmada (default 0) e o agregador o incrementa apenas para o novo estado.",
+    "log_evento emite uma linha de log sem lancar."
+  ],
+  "verification": [
+    "python -m pip install -e \".[dev]\"  (uma vez, se as deps dev ainda nao estiverem instaladas)",
+    "python -m pytest tests/test_contratos_base.py tests/test_classificador_origem.py tests/test_state_deriver.py tests/test_agregador_estatisticas.py",
+    "python -c \"import logging; from app.observabilidade.log_estruturado import log_evento; log_evento(logging.ERROR, 'teste', a=1)\""
+  ],
+  "blocked_reason": null,
+  "findings": "Simbolos adicionados para as FEATs seguintes: (1) app/dominio/tipos.py -> EventType.EXCLUSAO_NAO_CONFIRMADA (value 'exclusao_nao_confirmada') e Estado.EXCLUSAO_NAO_CONFIRMADA (value 'Exclusão não confirmada'); NAO esta em ESTADOS_TERMINAIS, esta em ESTADOS_PERMITIDOS (=frozenset(Estado)); ORIGEM_OBRIGATORIA_POR_TIPO inalterado. (2) app/dominio/classificador_origem.py -> ORIGEM_POR_TIPO[EventType.EXCLUSAO_NAO_CONFIRMADA] = EventSource.OBSERVADO (import nao levanta AssertionError). (3) app/dominio/constantes.py -> novas Final[int]: INTERVALO_SUPERVISAO_SEGUNDOS=5, MAX_REINICIOS_JANELA=5, JANELA_REINICIOS_SEGUNDOS=60, HEARTBEAT_VISIBILITY_SEGUNDOS=20 (VISIBILITY_TIMEOUT_SEGUNDOS=30 e MAX_RECEIVE_COUNT=2 intactos). (4) app/dominio/state_deriver.py -> derivar_estado retorna Estado.EXCLUSAO_NAO_CONFIRMADA quando esse evento e o desfecho mais recente dentro do laco reversed; DLQ e PROCESSADA tem precedencia (resolvidos antes do laco); reentrega posterior (recebida/processamento_iniciado) sobrepoe (nao terminal). (5) app/dominio/agregador_estatisticas.py -> EstatisticasFluxo.exclusao_nao_confirmada: int = 0 e ramo que incrementa somente para esse estado (nao conta como processadas/com_falha). (6) NOVO modulo app/observabilidade/log_estruturado.py -> log_evento(nivel: int, evento: str, **campos) -> None; logger name 'sqs_lab.resiliencia'; emite JSON uma linha via json.dumps(..., ensure_ascii=False, default=str); nunca lanca. Pacote app/observabilidade/__init__.py criado. NOTA: tests/test_contratos_base.py foi atualizado para incluir 'Exclusão não confirmada' no conjunto fechado de Estados (o assert do conjunto fechado quebraria sem isso). Suite completa: 331 passed."
+}

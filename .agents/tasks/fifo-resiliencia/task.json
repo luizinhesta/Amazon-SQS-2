@@ -1,0 +1,15 @@
+{
+  "task_id": "task-fifo-resiliencia",
+  "task_description": "Corrigir a falha real que derruba o Consumidor_FIFO quando o DeleteMessage encontra um ReceiptHandle expirado, mais resiliencia/supervisao das threads dos consumidores (sem duplicar), extensao opt-in de Visibility Timeout desligada por padrao, e diferenciacao de falhas no Dashboard com novo endpoint GET /api/consumidores/saude. Inclui os 12 testes obrigatorios e a atualizacao da documentacao. Fonte de verdade: .agents/tasks/fifo-resiliencia/design.md (APROVADO). Tudo DENTRO do worktree, sem tocar AWS real, sem merge/push, sem reiniciar servicos.",
+  "status": "completed",
+  "feature_order": [
+    "FEAT-001",
+    "FEAT-002",
+    "FEAT-003",
+    "FEAT-004",
+    "FEAT-005",
+    "FEAT-006",
+    "FEAT-007"
+  ],
+  "blocked_reason": null
+}

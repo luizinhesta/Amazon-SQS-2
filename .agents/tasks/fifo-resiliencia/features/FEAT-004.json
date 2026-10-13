@@ -1,0 +1,25 @@
+{
+  "id": "FEAT-004",
+  "type": "feat",
+  "description": "API de saude dos consumidores e exposicao do contador exclusao_nao_confirmada por fluxo (frente D, backend). Novo endpoint GET /api/consumidores/saude + schema + servico que inspeciona os slots em memoria do GerenciadorConsumidores (sem tocar AWS), campo exclusao_nao_confirmada em EstatisticasFluxoSaida (default 0, retrocompativel) e alinhamento dos docstrings de timeout. Depende de FEAT-003 (estado dos slots) e FEAT-001 (contador no agregador).",
+  "status": "completed",
+  "steps": [
+    "Em app/api/esquemas.py adicionar o schema RespostaSaudeConsumidores com: iniciados: bool, algum_morto: bool, algum_degradado: bool e consumidores: list de um item com tipo (standard/fifo), consumer_id, vivo: bool, degradado: bool, reinicios: int. Textos de descricao em pt-BR.",
+    "Em app/api/esquemas.py adicionar a EstatisticasFluxoSaida o campo exclusao_nao_confirmada: int = Field(0, ge=0, description=...) (default 0 para nao quebrar serializacoes existentes).",
+    "Criar app/api/servico_saude_consumidores.py com uma funcao que recebe o gerenciador (de request.app.state.gerenciador_consumidores): quando None, devolve RespostaSaudeConsumidores(iniciados=False, algum_morto=False, algum_degradado=False, consumidores=[]); quando presente, itera os slots em memoria (thread.is_alive(), degradado, reinicios, tipo, consumer_id) e monta a resposta, derivando algum_morto/algum_degradado. NAO tocar na AWS.",
+    "Em app/api/app.py registrar a rota GET /api/consumidores/saude (no roteador criar_roteador_consumidores existente ou um novo roteador /api/consumidores), passando o request ao servico. Garantir que a rota variavel '/{tipo}/instancias' nao capture 'saude' (registrar a rota literal /saude antes, ou usar caminho distinto).",
+    "Em app/api/servico_monitoramento.py, _fluxo_para_saida passa exclusao_nao_confirmada=estat.exclusao_nao_confirmada ao construir EstatisticasFluxoSaida.",
+    "Em app/api/app.py alinhar os docstrings que ainda dizem '3 s' para '10 s' (coerente com TIMEOUT_PADRAO_SEGUNDOS=10.0). NAO alterar o valor da constante."
+  ],
+  "acceptance_criteria": [
+    "GET /api/consumidores/saude responde 200 com iniciados=False e lista vazia quando o gerenciador e None, e com a lista de slots (tipo, consumer_id, vivo, degradado, reinicios) e os agregados algum_morto/algum_degradado quando presente; nunca retorna 500 e nunca chama a AWS.",
+    "A rota /api/consumidores/saude nao conflita com /api/consumidores/{tipo}/instancias.",
+    "EstatisticasFluxoSaida serializa exclusao_nao_confirmada (default 0 quando ausente) e _fluxo_para_saida propaga o valor do agregador.",
+    "Os docstrings de timeout em app/api/app.py dizem 10 s (sem mudar o valor efetivo)."
+  ],
+  "verification": [
+    "python -m pytest tests/test_api_config_saude.py tests/test_api_estatisticas_monitoramento.py tests/test_main_composicao.py"
+  ],
+  "blocked_reason": null,
+  "findings": "Implementado e verde (suite completa: 373 passed; 5 testes novos). CONTRATO PARA O FRONTEND (frente D). (1) NOVO endpoint GET /api/consumidores/saude -> response_model RespostaSaudeConsumidores. Shape JSON: {\"iniciados\": bool, \"algum_morto\": bool, \"algum_degradado\": bool, \"consumidores\": [{\"tipo\": \"standard\"|\"fifo\", \"consumer_id\": str, \"vivo\": bool, \"degradado\": bool, \"reinicios\": int}]}. Quando gerenciador None (consumidores nao iniciados): {\"iniciados\": false, \"algum_morto\": false, \"algum_degradado\": false, \"consumidores\": []}. Nunca retorna 500 e NUNCA chama AWS (le somente gerenciador.estado_slots() em memoria). algum_morto = any(not vivo); algum_degradado = any(degradado). A ordem da lista segue a ordem dos slots (standard antes de fifo, conforme iniciar()). (2) Novos schemas em app/api/esquemas.py: ConsumidorSaude e RespostaSaudeConsumidores (pt-BR). (3) EstatisticasFluxoSaida ganhou exclusao_nao_confirmada: int = Field(0, ge=0, ...) (default 0, retrocompativel) e aparece no JSON de /api/estatisticas em standard.* e fifo.* (0 quando ausente). servico_monitoramento._fluxo_para_saida propaga estat.exclusao_nao_confirmada do agregador (EstatisticasFluxo.exclusao_nao_confirmada da FEAT-001). (4) NOVO modulo app/api/servico_saude_consumidores.py -> obter_saude_consumidores(gerenciador: Optional[object]) -> RespostaSaudeConsumidores; usa estado_slots() (nao acessa _slots). (5) app/api/app.py: helper _gerenciador_consumidores(request) = getattr(request.app.state, 'gerenciador_consumidores', None) (atributo definido em app.main.compor_aplicacao; pode ser None em create_app puro); rota literal GET /saude registrada ANTES de PUT /{tipo}/instancias no criar_roteador_consumidores (caminhos distintos, sem conflito). (6) Docstrings de timeout em app.py alinhados de '3 s' para '10 s' (coerente com TIMEOUT_PADRAO_SEGUNDOS=10.0); valor da constante NAO alterado. NOTA: a composicao real injeta gerenciador_consumidores em app.state (main.py), mas o create_app isolado nao define o atributo; por isso o helper usa getattr com default None e o endpoint responde iniciados=False nesse caso."
+}
