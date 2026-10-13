@@ -65,9 +65,14 @@ def test_conjunto_de_estados_corresponde_ao_requisito_5_4() -> None:
         "Falha",
         "Aguardando nova tentativa",
         "Encaminhada para DLQ",
+        "Exclusão não confirmada",
     }
     assert ESTADOS_PERMITIDOS == frozenset(Estado)
     assert ESTADOS_TERMINAIS == frozenset({Estado.PROCESSADA, Estado.ENCAMINHADA_DLQ})
+    # O estado Exclusão não confirmada é permitido mas NÃO terminal: uma reentrega
+    # posterior pode reprocessar/concluir a mensagem.
+    assert Estado.EXCLUSAO_NAO_CONFIRMADA in ESTADOS_PERMITIDOS
+    assert Estado.EXCLUSAO_NAO_CONFIRMADA not in ESTADOS_TERMINAIS
 
 
 def test_event_source_tem_apenas_observado_e_inferido() -> None:

@@ -54,6 +54,9 @@ __all__ = [
 #   - enviada / recebida / excluida: retornos diretos de SendMessage /
 #     ReceiveMessage / DeleteMessage.
 #   - encaminhada_dlq: presença confirmada da mensagem na DLQ (Req. 6.6, 7.10).
+#   - exclusao_nao_confirmada: ação concreta constatada pela aplicação — o
+#     processamento terminou, mas o DeleteMessage falhou (ex.: ReceiptHandle
+#     expirado); registra que a exclusão NÃO foi confirmada.
 #   - processamento_iniciado / processada / falha: ações concretas do consumidor.
 #   - recebimento_repetido: detecção concreta de reentrega de um order_id já
 #     processado (Req. 9.4).
@@ -70,6 +73,7 @@ ORIGEM_POR_TIPO: dict[EventType, EventSource] = {
     EventType.PROVAVEL_EXPIRACAO_VISIBILITY: EventSource.INFERIDO,
     EventType.AGUARDANDO_NOVA_TENTATIVA: EventSource.INFERIDO,
     EventType.ENCAMINHADA_DLQ: EventSource.OBSERVADO,
+    EventType.EXCLUSAO_NAO_CONFIRMADA: EventSource.OBSERVADO,
     EventType.ERRO_VALIDACAO_ORDER_ID: EventSource.OBSERVADO,
     EventType.ERRO_ACESSO_HISTORICO: EventSource.OBSERVADO,
 }

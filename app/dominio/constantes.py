@@ -128,3 +128,20 @@ BLOQUEIO_AUTENTICACAO_SEGUNDOS: Final[int] = 300
 
 # Número máximo de tentativas de escrita na Tabela_Historico (Req. 11.2).
 MAX_TENTATIVAS_ESCRITA_HISTORICO: Final[int] = 3
+
+# ---------------------------------------------------------------------------
+# Supervisão e recuperação de consumidores (resiliência)
+# ---------------------------------------------------------------------------
+# Intervalo entre verificações do supervisor de threads de consumidores, em
+# segundos. O supervisor checa periodicamente se alguma thread encerrou de forma
+# inesperada e a reinicia, respeitando o critério de parada cooperativa.
+INTERVALO_SUPERVISAO_SEGUNDOS: Final[int] = 5
+# Número máximo de reinícios automáticos de um consumidor dentro da janela de
+# observação, evitando laços de reinício em falhas persistentes.
+MAX_REINICIOS_JANELA: Final[int] = 5
+# Janela de observação (em segundos) para contabilizar os reinícios automáticos.
+JANELA_REINICIOS_SEGUNDOS: Final[int] = 60
+# Intervalo (em segundos) entre extensões opcionais do Visibility_Timeout via
+# ChangeMessageVisibility (heartbeat) durante processamentos longos. Mantém a
+# mensagem invisível sem alterar o Visibility_Timeout de 30s configurado na fila.
+HEARTBEAT_VISIBILITY_SEGUNDOS: Final[int] = 20

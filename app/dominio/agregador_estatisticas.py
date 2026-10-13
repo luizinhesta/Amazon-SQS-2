@@ -74,6 +74,9 @@ class EstatisticasFluxo:
         processadas: mensagens processadas com sucesso (Req. 3.4).
         com_falha: mensagens no estado Falha (Req. 3.5).
         encaminhadas_dlq: mensagens encaminhadas para a DLQ (Req. 3.6).
+        exclusao_nao_confirmada: mensagens cujo processamento terminou mas cuja
+            exclusão (DeleteMessage) não foi confirmada. Não contam como
+            processadas nem como com_falha.
         recebidas_por_consumidor: recebimentos por ``consumer_id`` (Req. 3.7).
         tentativas_por_mensagem: contagem de tentativas (recebimentos) por
             ``order_id`` (Req. 5.2, 11.7).
@@ -85,6 +88,7 @@ class EstatisticasFluxo:
     processadas: int = 0
     com_falha: int = 0
     encaminhadas_dlq: int = 0
+    exclusao_nao_confirmada: int = 0
     recebidas_por_consumidor: dict[str, int] = field(default_factory=dict)
     tentativas_por_mensagem: dict[str, int] = field(default_factory=dict)
 
@@ -276,6 +280,8 @@ def agregar_estatisticas(
             destino.com_falha += 1
         elif estado is Estado.ENCAMINHADA_DLQ:
             destino.encaminhadas_dlq += 1
+        elif estado is Estado.EXCLUSAO_NAO_CONFIRMADA:
+            destino.exclusao_nao_confirmada += 1
 
     # Transfere os contadores diretos para o resultado (convertendo defaultdicts
     # em dicts simples e inteiros não-negativos).

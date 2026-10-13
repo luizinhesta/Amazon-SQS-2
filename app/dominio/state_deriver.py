@@ -117,6 +117,13 @@ def derivar_estado(
        com ``receive_count >= max_receive_count``.
     2. ``Processada`` (terminal) — há evento ``processada``.
     3. ``Em processamento`` — há ``processamento_iniciado`` sem desfecho posterior.
+    3b. ``Exclusão não confirmada`` (**não terminal**) — o processamento terminou,
+       mas o ``DeleteMessage`` falhou (ex.: ReceiptHandle expirado). É resolvido
+       dentro do laço como o desfecho mais recente; por não ser terminal, uma
+       reentrega ativa posterior (``recebida``/``processamento_iniciado``) o
+       sobrepõe, retornando ``Recebida``/``Em processamento``. ``Processada`` e
+       ``Encaminhada para DLQ`` continuam resolvidos antes do laço e têm
+       precedência sobre ele.
     4. ``Falha`` — última falha com ``receive_count < max_receive_count`` e sem
        reentrega posterior.
     5. ``Aguardando nova tentativa`` — houve falha/expiração e a mensagem voltou a
@@ -159,6 +166,14 @@ def derivar_estado(
             # Processamento em andamento sem desfecho posterior (processada/falha
             # já teriam sido tratados ou apareceriam depois na lista).
             return Estado.EM_PROCESSAMENTO
+
+        if tipo is EventType.EXCLUSAO_NAO_CONFIRMADA:
+            # Desfecho não terminal: o processamento terminou, mas o DeleteMessage
+            # falhou (ex.: ReceiptHandle expirado). Como `reversed` garante que o
+            # evento cronologicamente mais recente vence, uma reentrega posterior
+            # (recebida/processamento_iniciado) sobrepõe este estado antes de aqui
+            # chegar, retornando RECEBIDA/EM_PROCESSAMENTO.
+            return Estado.EXCLUSAO_NAO_CONFIRMADA
 
         if tipo is EventType.FALHA:
             # Falha recente: distingue-se entre "Falha" (ainda sem reentrega) e

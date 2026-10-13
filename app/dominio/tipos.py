@@ -33,6 +33,7 @@ class EventType(str, Enum):
     PROVAVEL_EXPIRACAO_VISIBILITY = "provavel_expiracao_visibility"
     AGUARDANDO_NOVA_TENTATIVA = "aguardando_nova_tentativa"
     ENCAMINHADA_DLQ = "encaminhada_dlq"
+    EXCLUSAO_NAO_CONFIRMADA = "exclusao_nao_confirmada"
     ERRO_VALIDACAO_ORDER_ID = "erro_validacao_order_id"
     ERRO_ACESSO_HISTORICO = "erro_acesso_historico"
 
@@ -66,6 +67,7 @@ class Estado(str, Enum):
     FALHA = "Falha"
     AGUARDANDO_NOVA_TENTATIVA = "Aguardando nova tentativa"
     ENCAMINHADA_DLQ = "Encaminhada para DLQ"
+    EXCLUSAO_NAO_CONFIRMADA = "Exclusão não confirmada"
 
 
 # Conjunto permitido de Estados (Req. 5.4). Útil para validações e testes de
