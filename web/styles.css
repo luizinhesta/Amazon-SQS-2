@@ -317,6 +317,39 @@ body {
   margin-right: 4px;
 }
 
+/*
+ * Estados distintos da faixa global (frente D), por precedência decrescente:
+ *  - --error (vermelha): API_Backend indisponível (falha real de rede/HTTP);
+ *  - --warn (amarela): consumidor em falha (morto/degradado) segundo /saude;
+ *  - --stale (laranja): dados desatualizados / timeout de cálculo (acima).
+ * As três classes são mutuamente exclusivas (createObservabilidade garante isso).
+ */
+.global-status--error {
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+  border-top: 1px solid var(--color-danger);
+  border-bottom: 1px solid var(--color-danger);
+  font-weight: 600;
+}
+
+.global-status--error::before {
+  content: "⛔ ";
+  margin-right: 4px;
+}
+
+.global-status--warn {
+  background-color: #3a311b;
+  color: #e0c052;
+  border-top: 1px solid #e0c052;
+  border-bottom: 1px solid #e0c052;
+  font-weight: 600;
+}
+
+.global-status--warn::before {
+  content: "⚠ ";
+  margin-right: 4px;
+}
+
 /* ============================================================= */
 /* Área: visão geral (Tarefa 17.2)                                */
 /* ============================================================= */
@@ -1034,6 +1067,17 @@ body {
 .estado-dlq {
   background-color: var(--color-danger-bg);
   color: var(--color-danger);
+}
+
+/*
+ * "Exclusão não confirmada": o processamento terminou mas o DeleteMessage não
+ * foi confirmado (ReceiptHandle expirado). Badge distinto (laranja AWS) para não
+ * se confundir com falha (vermelha) nem com processada (verde).
+ */
+.estado-exclusao-nao-confirmada {
+  background-color: var(--color-primary-contrast);
+  color: var(--color-primary);
+  border-color: var(--color-primary);
 }
 
 .estado-retentativa {

@@ -18,6 +18,7 @@
  *  - POST /api/laboratorio/cenario
  *  - POST /api/laboratorio/reprocessar-dlq
  *  - PUT  /api/consumidores/{tipo}/instancias
+ *  - GET  /api/consumidores/saude
  */
 
 const BASE_URL = "/api";
@@ -145,5 +146,10 @@ export const api = {
     return put(`/consumidores/${encodeURIComponent(tipo)}/instancias`, {
       instancias,
     });
+  },
+
+  /** GET /api/consumidores/saude — saúde dos consumidores (slots em memória). */
+  obterSaudeConsumidores() {
+    return get("/consumidores/saude");
   },
 };

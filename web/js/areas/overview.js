@@ -3,8 +3,10 @@
  *
  * Responsabilidades desta área:
  *  - Exibir as estatísticas agregadas por fluxo (Standard e FIFO): enviadas,
- *    disponíveis, em processamento, processadas, com falha, encaminhadas para DLQ
- *    e recebidas por cada consumidor (Req. 3.1-3.8, 3.12).
+ *    disponíveis, em processamento, processadas, com falha, exclusão não
+ *    confirmada, encaminhadas para DLQ e recebidas por cada consumidor
+ *    (Req. 3.1-3.8, 3.12). A linha "Exclusão não confirmada" é distinta da linha
+ *    "Com falha" e trata a ausência do campo como 0 (retrocompatível).
  *  - Exibir o horário da última atualização bem-sucedida das estatísticas, com
  *    data, hora (horas/minutos/segundos) e identificação do fuso (Req. 3.10).
  *  - Exibir os parâmetros de configuração com rótulo distinto Config_Aplicada e
@@ -33,6 +35,7 @@ const STAT_LABELS = [
   { key: "em_processamento", label: "Em processamento" },
   { key: "processadas", label: "Processadas" },
   { key: "com_falha", label: "Com falha" },
+  { key: "exclusao_nao_confirmada", label: "Exclusão não confirmada" },
   { key: "encaminhadas_dlq", label: "Encaminhadas para DLQ" },
 ];
 

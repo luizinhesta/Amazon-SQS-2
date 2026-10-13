@@ -46,6 +46,7 @@ const CLASSE_ESTADO = {
   Falha: "estado-falha",
   "Aguardando nova tentativa": "estado-retentativa",
   "Encaminhada para DLQ": "estado-dlq",
+  "Exclusão não confirmada": "estado-exclusao-nao-confirmada",
 };
 
 /**

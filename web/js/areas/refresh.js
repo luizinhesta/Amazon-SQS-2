@@ -53,6 +53,15 @@ export const MENSAGEM_DADOS_DESATUALIZADOS =
   "Não foi possível atualizar os dados. Os últimos dados válidos foram " +
   "preservados e podem estar desatualizados.";
 
+/** Mensagem em pt-BR exibida quando a atualização excede o tempo limite de cálculo (Req. 14.*). */
+export const MENSAGEM_TIMEOUT_CALCULO =
+  "A atualização excedeu o tempo limite de cálculo. Os últimos dados " +
+  "válidos foram preservados.";
+
+/** Mensagem em pt-BR exibida quando a API_Backend está indisponível (sem conexão/HTTP). */
+export const MENSAGEM_API_INDISPONIVEL =
+  "API indisponível. Verifique a conexão ou se o serviço está no ar.";
+
 /** Prefixo da indicação de horário da última atualização bem-sucedida (Req. 3.10, 13.4). */
 const PREFIXO_ULTIMA_ATUALIZACAO = "Última atualização:";
 
@@ -109,7 +118,20 @@ export function formatarHorarioAtualizacao(data) {
  * @param {Document|HTMLElement} [options.root] Raiz de busca dos elementos (padrão: document).
  * @param {string} [options.lastUpdateId] Id do elemento de horário (padrão "last-update").
  * @param {string} [options.statusId] Id da faixa de status (padrão "global-status").
- * @returns {{marcarSucesso: (data?: Date) => void, marcarFalha: (mensagem?: string) => void}}
+ * A faixa `#global-status` tem três estados mutuamente exclusivos, aplicados por
+ * métodos distintos conforme a precedência do onTick (ver main.js):
+ *  - `marcarIndisponivel()` — API_Backend fora do ar (classe `global-status--error`, vermelha);
+ *  - `marcarAtencao(texto)` — consumidor em falha (classe `global-status--warn`, amarela);
+ *  - `marcarFalha(mensagem)` — dados desatualizados/timeout de cálculo (classe `global-status--stale`, laranja).
+ * Cada método remove as outras duas classes de estado antes de aplicar a sua, e
+ * `marcarSucesso` limpa as três (atualização bem-sucedida).
+ *
+ * @returns {{
+ *   marcarSucesso: (data?: Date) => void,
+ *   marcarFalha: (mensagem?: string) => void,
+ *   marcarIndisponivel: () => void,
+ *   marcarAtencao: (texto: string) => void,
+ * }}
  */
 export function createObservabilidade({
   root = typeof document !== "undefined" ? document : null,
@@ -118,31 +140,55 @@ export function createObservabilidade({
 } = {}) {
   const buscar = (id) => (root && root.getElementById ? root.getElementById(id) : null);
 
+  // Classes mutuamente exclusivas da faixa de status global.
+  const CLASSES_ESTADO = [
+    "global-status--stale",
+    "global-status--error",
+    "global-status--warn",
+  ];
+
+  /** Exibe a faixa com uma mensagem e aplica somente a classe informada. */
+  function aplicarEstado(classe, mensagem) {
+    const status = buscar(statusId);
+    if (!status) {
+      return;
+    }
+    status.textContent = mensagem;
+    status.hidden = false;
+    status.classList.remove(...CLASSES_ESTADO);
+    status.classList.add(classe);
+  }
+
   function marcarSucesso(data = new Date()) {
     const lastUpdate = buscar(lastUpdateId);
     if (lastUpdate) {
       lastUpdate.textContent = formatarHorarioAtualizacao(data);
     }
-    // Esconde a faixa de dados desatualizados: a atualização foi bem-sucedida.
+    // Esconde a faixa: a atualização foi bem-sucedida (limpa os três estados).
     const status = buscar(statusId);
     if (status) {
       status.hidden = true;
       status.textContent = "";
-      status.classList.remove("global-status--stale");
+      status.classList.remove(...CLASSES_ESTADO);
     }
   }
 
   function marcarFalha(mensagem = MENSAGEM_DADOS_DESATUALIZADOS) {
     // Preserva o horário da última atualização bem-sucedida (NÃO altera #last-update).
-    const status = buscar(statusId);
-    if (status) {
-      status.textContent = mensagem;
-      status.hidden = false;
-      status.classList.add("global-status--stale");
-    }
+    aplicarEstado("global-status--stale", mensagem);
   }
 
-  return { marcarSucesso, marcarFalha };
+  function marcarIndisponivel() {
+    // API_Backend fora do ar: estado de erro (vermelha), precedência máxima.
+    aplicarEstado("global-status--error", MENSAGEM_API_INDISPONIVEL);
+  }
+
+  function marcarAtencao(texto) {
+    // Consumidor em falha: estado de atenção (amarela); texto injetado pelo chamador.
+    aplicarEstado("global-status--warn", texto);
+  }
+
+  return { marcarSucesso, marcarFalha, marcarIndisponivel, marcarAtencao };
 }
 
 /**
@@ -162,6 +208,7 @@ export function createObservabilidade({
  * @param {(mensagem: string) => void} [options.onIntervalRejected] Notificado quando um intervalo é rejeitado (Req. 13.3).
  * @param {(erro: unknown) => void} [options.onError] Notificado quando um tick falha (além da indicação visual).
  * @param {ReturnType<typeof createObservabilidade>} [options.observabilidade] Indicador de observabilidade (padrão: elementos do DOM).
+ * @param {boolean} [options.gerenciaObservabilidade=true] Quando true (padrão), o controlador marca sucesso/falha automaticamente a cada tick. Quando false, o `onTick` assume a observabilidade (chama obs.* por conta própria) e o controlador só aciona `marcarFalha` no catch, como salvaguarda.
  * @param {{setInterval: Function, clearInterval: Function}} [options.timers] Temporizadores injetáveis (para testes).
  * @returns {{
  *   start: () => void,
@@ -180,6 +227,7 @@ export function createRefreshController({
   onIntervalRejected,
   onError,
   observabilidade,
+  gerenciaObservabilidade = true,
   timers = {
     setInterval:
       typeof setInterval !== "undefined" ? setInterval.bind(globalThis) : null,
@@ -211,9 +259,15 @@ export function createRefreshController({
     tickEmAndamento = true;
     try {
       await onTick();
-      obs.marcarSucesso(new Date());
+      // Quando o onTick assume a observabilidade (gerenciaObservabilidade=false),
+      // ele próprio chama obs.* conforme a precedência; não sobrescrevemos aqui.
+      if (gerenciaObservabilidade) {
+        obs.marcarSucesso(new Date());
+      }
     } catch (erro) {
       // Falha: preserva os últimos dados válidos e indica desatualização (Req. 3.11, 13.5).
+      // Salvaguarda: mesmo com onTick gerenciando a observabilidade, uma exceção
+      // inesperada cai aqui e sinaliza desatualização.
       obs.marcarFalha();
       if (typeof onError === "function") {
         onError(erro);

@@ -19,7 +19,11 @@
 import { api } from "./api.js";
 import { setupLogin } from "./auth.js";
 import { setupNavigation } from "./navigation.js";
-import { createRefreshController } from "./areas/refresh.js";
+import {
+  createRefreshController,
+  createObservabilidade,
+  MENSAGEM_TIMEOUT_CALCULO,
+} from "./areas/refresh.js";
 
 import * as overview from "./areas/overview.js";
 import * as send from "./areas/send.js";
@@ -105,44 +109,91 @@ function conectarAbrirHistorico(nav) {
   return () => document.removeEventListener("abrir-historico", handler);
 }
 
+/**
+ * Indica se há algum consumidor em falha segundo o endpoint de saúde
+ * (`GET /api/consumidores/saude`). Um consumidor "morto" (thread encerrada) ou
+ * "degradado" caracteriza falha a sinalizar na faixa amarela (Req. frente D).
+ *
+ * @param {{algum_morto?: boolean, algum_degradado?: boolean}} saude Resposta de saúde.
+ * @returns {boolean}
+ */
+function temConsumidorEmFalha(saude) {
+  return Boolean(saude && (saude.algum_morto || saude.algum_degradado));
+}
+
+/**
+ * Descreve a falha do primeiro slot problemático (morto ou degradado) para a
+ * mensagem da faixa amarela, identificando o tipo e o consumer_id.
+ *
+ * @param {{consumidores?: Array<{tipo?: string, consumer_id?: string, vivo?: boolean, degradado?: boolean}>}} saude
+ * @returns {string} Texto em pt-BR.
+ */
+function descreverFalhaConsumidor(saude) {
+  const lista = saude && Array.isArray(saude.consumidores) ? saude.consumidores : [];
+  const slot = lista.find((c) => c && (c.vivo === false || c.degradado));
+  if (!slot) {
+    return "Um consumidor está em falha. Verifique os logs do serviço.";
+  }
+  const tipo = slot.tipo || "desconhecido";
+  const id = slot.consumer_id || "sem id";
+  const situacao = slot.vivo === false ? "encerrado" : "degradado";
+  return `Consumidor ${tipo} (${id}) ${situacao}. Verifique os logs do serviço.`;
+}
+
 function iniciarPainel() {
   mostrarDashboard();
   const nav = setupNavigation();
   inicializarAreas();
 
-  // Atualização periódica (Tarefa 17.5): a cada tick, busca estatísticas e
-  // monitoramento. As áreas renderizam os dados; aqui apenas disparamos a busca.
+  // Atualização periódica (Tarefa 17.5 + frente D): a cada tick, busca
+  // estatísticas, monitoramento e saúde dos consumidores. As áreas renderizam os
+  // dados; aqui controlamos somente a faixa global de observabilidade.
   //
-  // Resiliência a falha parcial: usamos Promise.allSettled em vez de Promise.all
-  // para que a lentidão ou falha de UMA das chamadas não derrube o tick inteiro.
-  // Regra de sucesso/falha da faixa "Não foi possível atualizar os dados":
-  //  - O tick é SUCESSO quando pelo menos uma das duas chamadas responde com
-  //    status HTTP ok (resolve). Isso vale INCLUSIVE quando o corpo traz
-  //    `timeout: true`, pois o timeout do cálculo é transitório (HTTP 200), não
-  //    uma falha real de conexão — as áreas (overview/monitoring) já tratam esse
-  //    caso individualmente, preservando os últimos dados válidos.
-  //  - O tick só é FALHA (lança erro, fazendo o refresh exibir a faixa) quando
-  //    AMBAS as chamadas rejeitarem por erro REAL de rede/HTTP (fetch falhou ou
-  //    status não-ok, que o cliente converte em ApiError).
+  // A faixa #global-status tem quatro desfechos, aplicados por PRECEDÊNCIA (do
+  // mais crítico para o menos crítico), e o onTick nunca lança (o catch do
+  // refresh.js fica apenas como salvaguarda):
+  //  (1) API indisponível (vermelha): estatística E monitoramento rejeitaram por
+  //      erro real de rede/HTTP (ApiError) -> obs.marcarIndisponivel().
+  //  (2) Consumidor em falha (amarela): a saúde resolveu e indica morto/degradado
+  //      -> obs.marcarAtencao(...). A falha da PRÓPRIA chamada de saúde (rejeição)
+  //      NÃO aciona a amarela.
+  //  (3) Timeout de cálculo (laranja): alguma resposta resolveu com `timeout:true`
+  //      -> obs.marcarFalha(MENSAGEM_TIMEOUT_CALCULO).
+  //  (4) Sucesso: obs.marcarSucesso().
+  const obs = createObservabilidade();
   const refresh = createRefreshController({
+    observabilidade: obs,
+    gerenciaObservabilidade: false,
     onTick: async () => {
-      const resultados = await Promise.allSettled([
+      const [rEstat, rMonit, rSaude] = await Promise.allSettled([
         api.obterEstatisticas(),
         api.obterMonitoramento(),
+        api.obterSaudeConsumidores(),
       ]);
 
-      // Sucesso quando ao menos uma chamada resolveu (resposta HTTP ok). Uma
-      // resposta 200 com `timeout: true` conta como resolvida (não é erro real).
-      const algumaOk = resultados.some((r) => r.status === "fulfilled");
-      if (algumaOk) {
+      // (1) API indisponível: AMBAS estatística e monitoramento rejeitaram.
+      if (rEstat.status === "rejected" && rMonit.status === "rejected") {
+        obs.marcarIndisponivel();
         return;
       }
 
-      // Ambas rejeitaram: falha real de rede/HTTP. Propaga o erro para o refresh
-      // marcar a faixa de dados desatualizados.
-      const primeiraFalha = resultados.find((r) => r.status === "rejected");
-      throw (primeiraFalha && primeiraFalha.reason) ||
-        new Error("Falha ao atualizar estatísticas e monitoramento.");
+      // (2) Consumidor em falha: só quando a chamada de saúde RESOLVEU.
+      if (rSaude.status === "fulfilled" && temConsumidorEmFalha(rSaude.value)) {
+        obs.marcarAtencao(descreverFalhaConsumidor(rSaude.value));
+        return;
+      }
+
+      // (3) Timeout de cálculo: alguma resposta HTTP ok trouxe `timeout: true`.
+      const algumTimeout = [rEstat, rMonit].some(
+        (r) => r.status === "fulfilled" && r.value && r.value.timeout
+      );
+      if (algumTimeout) {
+        obs.marcarFalha(MENSAGEM_TIMEOUT_CALCULO);
+        return;
+      }
+
+      // (4) Sucesso.
+      obs.marcarSucesso();
     },
   });
   refresh.start();
