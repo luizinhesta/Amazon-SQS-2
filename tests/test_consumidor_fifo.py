@@ -475,3 +475,92 @@ def test_envio_sem_message_group_id_falha() -> None:
             deduplicacao_por_conteudo=True,
         )
     assert sqs.envios == []
+
+
+# ---------------------------------------------------------------------------
+# Resiliência: guarda por iteração e exclusão não confirmada (FEAT-003)
+# ---------------------------------------------------------------------------
+
+
+class _SqsReceberLancaUmaVez(SqsFake):
+    """SqsFake cujo ``receive_messages`` lança na primeira chamada e depois volta.
+
+    Após a primeira falha, devolve lotes vazios (recebimento normal), para verificar
+    que a guarda por iteração NÃO encerra a thread do consumidor FIFO.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(lotes=[])
+        self.chamadas = 0
+
+    def receive_messages(self, nome_fila, *, max_mensagens=10, wait_time_seconds=20, visibility_timeout=None):
+        self.chamadas += 1
+        if self.chamadas == 1:
+            raise RuntimeError("falha pontual simulada do SQS")
+        return []
+
+
+def test_excecao_pontual_na_iteracao_nao_encerra_o_laco_fifo() -> None:
+    # Critério de aceitação: exceção pontual é logada (WARNING), SEMPRE anexa um
+    # ResultadoIteracaoFifo (append nunca pulado) e o laço continua.
+    sqs = _SqsReceberLancaUmaVez()
+    consumidor = _consumidor(sqs)
+
+    resumo = consumidor.executar(criterio_parada=_parar_apos(3))
+
+    assert len(resumo.iteracoes) == 3  # o append da iteração de erro não foi pulado
+    assert resumo.iteracoes_com_erro == 1
+    assert resumo.iteracoes[0].erro is not None
+    # As duas iterações seguintes correram normalmente (recebimento vazio).
+    assert resumo.iteracoes[1].erro is None
+    assert resumo.iteracoes[2].erro is None
+
+
+def test_parada_cooperativa_nao_e_capturada_pela_guarda_fifo() -> None:
+    # Critério de aceitação: BaseException NÃO é capturada pela guarda (só Exception).
+    class _SqsBaseException(SqsFake):
+        def __init__(self) -> None:
+            super().__init__(lotes=[])
+
+        def receive_messages(self, *a, **k):
+            raise KeyboardInterrupt("parada cooperativa simulada")
+
+    consumidor = _consumidor(_SqsBaseException())
+
+    with pytest.raises(KeyboardInterrupt):
+        consumidor.executar(criterio_parada=_parar_apos(3))
+
+
+class _ProcessadorExclusaoNaoConfirmada:
+    """Dublê de processar_mensagem que sinaliza exclusao_nao_confirmada por order_id."""
+
+    def __init__(self, order_ids_nao_confirmados: set[str]) -> None:
+        self._nao_confirmados = order_ids_nao_confirmados
+
+    def __call__(self, mensagem, *, order_id=None, cenario, **kwargs) -> ResultadoProcessamento:
+        order = order_id if order_id is not None else mensagem.body
+        nao_confirmada = order in self._nao_confirmados
+        return ResultadoProcessamento(
+            order_id=order,
+            cenario=cenario,
+            sucesso=not nao_confirmada,
+            excluida=not nao_confirmada,
+            exclusao_nao_confirmada=nao_confirmada,
+        )
+
+
+def test_exclusao_nao_confirmada_contada_separada_no_fifo() -> None:
+    # Critério de aceitação (Opção A): a exclusão não confirmada é contabilizada
+    # separada das falhas; a iteração expõe os order_id afetados.
+    lote = [
+        _msg(order_id="p1", grupo="G1"),
+        _msg(order_id="p2", grupo="G1"),
+    ]
+    sqs = SqsFake(lotes=[lote])
+    processador = _ProcessadorExclusaoNaoConfirmada({"p2"})
+    consumidor = _consumidor(sqs, processador=processador)  # type: ignore[arg-type]
+
+    resultado = consumidor.processar_uma_iteracao()
+
+    assert resultado.processadas_do_grupo == ["p1", "p2"]
+    assert resultado.exclusoes_nao_confirmadas == ["p2"]

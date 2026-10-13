@@ -49,6 +49,7 @@ Referências de requisitos: 8.2, 10.5, 10.6, 14.6, 4.6, 4.7.
 from __future__ import annotations
 
 import itertools
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -75,6 +76,7 @@ from app.consumidores.processamento import (
 )
 from app.dominio import constantes as c
 from app.dominio.tipos import EventType
+from app.observabilidade.log_estruturado import log_evento
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +269,13 @@ class ResultadoIteracaoFifo:
             de todas as mensagens do grupo selecionado (independentemente da decisão
             de idempotência). Útil para verificar a preservação de ordem (Req. 10.5).
         decisoes: Decisões de idempotência tomadas, na ordem de recebimento do grupo.
+        exclusoes_nao_confirmadas: Lista, na ordem de processamento, dos ``order_id``
+            cujo processamento terminou, mas o DeleteMessage não foi confirmado
+            (ReceiptHandle expirado / falha de infra). Separado das falhas de
+            processamento (Opção A).
+        erro: Quando a iteração foi encerrada por uma exceção pontual capturada pela
+            guarda do laço, contém a representação do erro (``repr``). ``None`` em
+            uma iteração bem-sucedida.
     """
 
     recebidas: int
@@ -274,6 +283,8 @@ class ResultadoIteracaoFifo:
     processadas_do_grupo: list[str] = field(default_factory=list)
     ordem_recebimento_do_grupo: list[str] = field(default_factory=list)
     decisoes: list[DecisaoIdempotencia] = field(default_factory=list)
+    exclusoes_nao_confirmadas: list[str] = field(default_factory=list)
+    erro: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -297,6 +308,16 @@ class ResultadoConsumoFifo:
     @property
     def total_processadas(self) -> int:
         return sum(len(it.processadas_do_grupo) for it in self.iteracoes)
+
+    @property
+    def iteracoes_com_erro(self) -> int:
+        """Número de iterações encerradas por exceção pontual capturada pela guarda."""
+        return sum(1 for it in self.iteracoes if it.erro is not None)
+
+    @property
+    def total_exclusoes_nao_confirmadas(self) -> int:
+        """Total de mensagens processadas cujo DeleteMessage não foi confirmado."""
+        return sum(len(it.exclusoes_nao_confirmadas) for it in self.iteracoes)
 
 
 def _novo_consumer_id() -> str:
@@ -410,6 +431,7 @@ class ConsumidorFifo:
         processadas: list[str] = []
         ordem_recebimento: list[str] = []
         decisoes: list[DecisaoIdempotencia] = []
+        exclusoes_nao_confirmadas: list[str] = []
 
         # Processa SOMENTE o grupo selecionado, preservando a ordem de recebimento
         # dentro do grupo (Req. 10.5, 10.6). As mensagens dos demais grupos ficam na
@@ -435,7 +457,7 @@ class ConsumidorFifo:
                 # efeitos; a mensagem é preservada conforme a decisão (Req. 9).
                 continue
 
-            self._processar_mensagem(
+            resultado = self._processar_mensagem(
                 mensagem,
                 nome_fila=self._nome_fila,
                 consumer_id=self.consumer_id,
@@ -448,6 +470,11 @@ class ConsumidorFifo:
                 order_id=order_id,
             )
             processadas.append(order_id)
+            # Opção A: a exclusão não confirmada é contabilizada separada das
+            # falhas de processamento (o negócio foi executado; só o DeleteMessage
+            # não foi confirmado — ReceiptHandle expirado / falha de infra).
+            if getattr(resultado, "exclusao_nao_confirmada", False):
+                exclusoes_nao_confirmadas.append(order_id)
 
         return ResultadoIteracaoFifo(
             recebidas=len(mensagens),
@@ -455,6 +482,7 @@ class ConsumidorFifo:
             processadas_do_grupo=processadas,
             ordem_recebimento_do_grupo=ordem_recebimento,
             decisoes=decisoes,
+            exclusoes_nao_confirmadas=exclusoes_nao_confirmadas,
         )
 
     # ------------------------------------------------------------------
@@ -491,7 +519,27 @@ class ConsumidorFifo:
                 break
             if criterio_parada():
                 break
-            iteracoes.append(self.processar_uma_iteracao())
+            try:
+                iteracoes.append(self.processar_uma_iteracao())
+            except Exception as e:  # NÃO captura BaseException (parada cooperativa).
+                # Uma falha pontual de SQS/DynamoDB não deve encerrar a thread do
+                # consumidor FIFO: registramos de forma estruturada e SEMPRE
+                # anexamos um resultado de iteração (o append nunca é pulado), para
+                # que o resumo contabilize a ocorrência e o laço continue.
+                log_evento(
+                    logging.WARNING,
+                    "iteracao_consumidor_falhou",
+                    consumer_id=self.consumer_id,
+                    fila=self._nome_fila,
+                    erro=repr(e),
+                )
+                iteracoes.append(
+                    ResultadoIteracaoFifo(
+                        recebidas=0,
+                        grupo_selecionado=None,
+                        erro=repr(e),
+                    )
+                )
         return ResultadoConsumoFifo(consumer_id=self.consumer_id, iteracoes=iteracoes)
 
     # ------------------------------------------------------------------

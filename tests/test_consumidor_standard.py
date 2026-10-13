@@ -444,3 +444,90 @@ def test_corpo_json_do_produtor_deriva_cenario_de_falha_do_corpo() -> None:
     # O histórico foi particionado pelo order_id real (não pelo JSON inteiro).
     assert historico.consultar_por_pedido("teste1-standard-0002")
     assert historico.consultar_por_pedido(corpo) == []
+
+
+# ---------------------------------------------------------------------------
+# Resiliência: guarda por iteração e desfecho de exclusão não confirmada (FEAT-003)
+# ---------------------------------------------------------------------------
+
+
+class _SqsFalhaEntaoVazio:
+    """SQS cujo ``receive_messages`` lança uma vez e depois volta a funcionar vazio.
+
+    Permite verificar que uma exceção pontual numa iteração NÃO encerra a thread do
+    consumidor: o laço registra a falha e continua nas iterações seguintes.
+    """
+
+    def __init__(self) -> None:
+        self.chamadas = 0
+
+    def receive_messages(self, nome_fila, *, max_mensagens, wait_time_seconds, visibility_timeout=None):
+        self.chamadas += 1
+        if self.chamadas == 1:
+            raise RuntimeError("falha pontual simulada do SQS")
+        return []
+
+    def delete_message(self, nome_fila, receipt_handle):  # pragma: no cover - não usado
+        return {}
+
+
+def test_excecao_pontual_na_iteracao_nao_encerra_o_laco() -> None:
+    # Critério de aceitação: uma exceção pontual é logada (WARNING) e NÃO encerra o
+    # laço; iteracoes_com_erro reflete a ocorrência.
+    sqs = _SqsFalhaEntaoVazio()
+    historico = HistoricoFake()
+    consumidor = _consumidor(sqs, historico)  # type: ignore[arg-type]
+
+    estat = consumidor.executar(max_iteracoes=3)
+
+    assert estat.iteracoes == 3
+    assert estat.iteracoes_com_erro == 1  # apenas a primeira iteração falhou
+    assert estat.recebimentos_vazios == 2  # as duas seguintes correram normalmente
+
+
+def test_parada_cooperativa_nao_e_capturada_pela_guarda() -> None:
+    # Critério de aceitação: BaseException (parada cooperativa) NÃO é capturada pela
+    # guarda (que captura apenas Exception). Usamos KeyboardInterrupt (BaseException).
+    class _SqsBaseException:
+        def receive_messages(self, *a, **k):
+            raise KeyboardInterrupt("parada cooperativa simulada")
+
+        def delete_message(self, *a, **k):  # pragma: no cover
+            return {}
+
+    consumidor = _consumidor(_SqsBaseException(), HistoricoFake())  # type: ignore[arg-type]
+
+    import pytest
+
+    with pytest.raises(KeyboardInterrupt):
+        consumidor.executar(max_iteracoes=3)
+
+
+def test_exclusao_nao_confirmada_conta_separado_das_falhas() -> None:
+    # Critério de aceitação: resultado com exclusao_nao_confirmada=True incrementa
+    # exclusoes_nao_confirmadas e NÃO falhas_processamento.
+    def processar_fake(
+        mensagem: MensagemRecebida,
+        *,
+        order_id: Optional[str] = None,
+        cenario: CenarioFalha,
+        **kwargs: Any,
+    ) -> ResultadoProcessamento:
+        return ResultadoProcessamento(
+            order_id=order_id or mensagem.body,
+            cenario=cenario,
+            sucesso=False,
+            excluida=False,
+            exclusao_nao_confirmada=True,
+            erro_detalhe="ReceiptHandle expirado (simulado)",
+        )
+
+    sqs = SqsFake(lotes=[[_mensagem(body="pedido-X", receipt_handle="rh1")]])
+    historico = HistoricoFake()
+    consumidor = _consumidor(sqs, historico, processar_mensagem_fn=processar_fake)
+
+    estat = consumidor.executar(max_iteracoes=1)
+
+    assert estat.exclusoes_nao_confirmadas == 1
+    assert estat.falhas_processamento == 0
+    assert estat.processadas_com_sucesso == 0

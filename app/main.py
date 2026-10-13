@@ -48,9 +48,11 @@ Referências de requisitos: 1.6, 1.8, 8.1, 8.2, 10.1, 10.2, 12.1, 12.2.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -72,6 +74,7 @@ from app.consumidores.consumidor_standard import (
 )
 from app.consumidores.monitor_dlq import GerenciadorMonitorDlq, MonitorDlq
 from app.dominio import constantes as c
+from app.observabilidade.log_estruturado import log_evento
 from app.seguranca.autenticacao import ControladorAutenticacao
 from app.verificacao_inicializacao import (
     ResultadoVerificacao,
@@ -102,106 +105,319 @@ DIRETORIO_DASHBOARD_PADRAO: str = os.path.join(_RAIZ_PROJETO, "web")
 # ---------------------------------------------------------------------------
 # Gerenciamento do ciclo de vida dos consumidores (threads de segundo plano)
 # ---------------------------------------------------------------------------
+# Rótulos de tipo de consumidor usados internamente pelos slots.
+_TIPO_STANDARD: str = TIPO_CONSUMIDOR_STANDARD
+_TIPO_FIFO: str = TIPO_CONSUMIDOR_FIFO
+
+
+@dataclass
+class _SlotConsumidor:
+    """Posição gerenciada por uma única instância de consumidor e sua thread.
+
+    Um *slot* representa uma vaga lógica (ex.: "o 2º consumidor FIFO"). Em cada
+    momento há **no máximo uma** thread viva por slot. Quando a thread morre
+    inesperadamente, o supervisor cria um novo consumidor+thread **no mesmo slot**
+    (nova instância com novo ``consumer_id``), de modo que não há duplicação: o slot
+    continua representando uma única vaga.
+
+    Atributos:
+        tipo: ``"standard"`` ou ``"fifo"``.
+        consumidor: a instância de consumidor atualmente associada ao slot.
+        thread: a thread *daemon* que roda o laço do consumidor.
+        reinicios: total de reinícios já realizados para este slot (acumulado).
+        marcos_reinicio: *timestamps* (``time.monotonic``) dos reinícios recentes,
+            usados para aplicar o teto por janela deslizante.
+        degradado: ``True`` quando o slot excedeu o teto de reinícios na janela e
+            deixou de ser reiniciado automaticamente (falha persistente).
+    """
+
+    tipo: str
+    consumidor: object
+    thread: threading.Thread
+    reinicios: int = 0
+    marcos_reinicio: list[float] = field(default_factory=list)
+    degradado: bool = False
+
+
+@dataclass
+class EstadoSlotConsumidor:
+    """Visão imutável do estado de um slot, exposta ao endpoint de saúde (FEAT-004).
+
+    Atributos:
+        tipo: ``"standard"`` ou ``"fifo"``.
+        consumer_id: identificador da instância atualmente associada ao slot.
+        vivo: ``True`` se a thread do slot está viva (``thread.is_alive()``).
+        degradado: ``True`` se o slot foi marcado como falha persistente.
+        reinicios: total de reinícios já realizados para o slot.
+    """
+
+    tipo: str
+    consumer_id: str
+    vivo: bool
+    degradado: bool
+    reinicios: int
+
+
 @dataclass
 class GerenciadorConsumidores:
-    """Inicia e encerra os consumidores Standard e FIFO como threads daemon.
+    """Inicia, supervisiona e encerra os consumidores Standard e FIFO.
 
     O número de instâncias de cada tipo é lido do
     :class:`~app.api.estado_instancias.EstadoInstanciasConsumidores` no momento do
-    início (Req. 10.1, 10.2). Cada instância recebe um ``consumer_id`` único e roda
-    seu laço em uma thread *daemon*, parando de forma cooperativa quando
-    :meth:`parar` é chamado (no *shutdown* da aplicação).
+    início (Req. 10.1, 10.2). Cada instância ocupa um *slot* e roda seu laço em uma
+    thread *daemon*, parando de forma cooperativa quando :meth:`parar` é chamado (no
+    *shutdown* da aplicação).
+
+    Resiliência (frente B): uma thread *supervisora* dedicada verifica
+    periodicamente se algum slot morreu inesperadamente e, nesse caso, recria o
+    consumidor **no mesmo slot** (nova instância, novo ``consumer_id``), sem duplicar
+    consumidores. Uma política de reinício com teto por janela deslizante evita laços
+    de reinício em falhas persistentes: ao exceder
+    :data:`~app.dominio.constantes.MAX_REINICIOS_JANELA` reinícios dentro de
+    :data:`~app.dominio.constantes.JANELA_REINICIOS_SEGUNDOS`, o slot é marcado como
+    ``degradado`` e deixa de ser reiniciado.
 
     As dependências (``SqsGateway`` e ``HistoricoRepository``) são injetadas para que
-    os testes substituam a AWS por dublês. O laço de cada consumidor é interrompido
-    por um ``threading.Event`` compartilhado: enquanto ele não estiver *setado*, o
-    laço continua; ao sinalizá-lo, o laço para na próxima verificação.
+    os testes substituam a AWS por dublês. O laço de cada consumidor e o supervisor
+    são interrompidos por um ``threading.Event`` compartilhado.
     """
 
     gateway: SqsGateway
     historico: HistoricoRepository
     estado_instancias: EstadoInstanciasConsumidores
     _parada: threading.Event = field(default_factory=threading.Event, init=False)
-    _threads: list[threading.Thread] = field(default_factory=list, init=False)
-    _consumidores_standard: list[ConsumidorStandard] = field(
-        default_factory=list, init=False
-    )
-    _consumidores_fifo: list[ConsumidorFifo] = field(default_factory=list, init=False)
+    _slots: list[_SlotConsumidor] = field(default_factory=list, init=False)
+    _supervisor: Optional[threading.Thread] = field(default=None, init=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def _deve_parar(self) -> bool:
         """Critério de parada cooperativa compartilhado pelos laços dos consumidores."""
         return self._parada.is_set()
 
+    # ------------------------------------------------------------------
+    # Criação de consumidor + thread por tipo
+    # ------------------------------------------------------------------
+    def _criar_consumidor(self, tipo: str) -> object:
+        """Cria uma nova instância de consumidor do ``tipo`` com ``consumer_id`` novo."""
+        if tipo == _TIPO_STANDARD:
+            return criar_consumidor_standard(self.gateway, self.historico)
+        return ConsumidorFifo(
+            sqs=self.gateway,
+            historico=self.historico,
+            consumer_id=gerar_consumer_id("consumidor-fifo"),
+        )
+
+    def _criar_thread(self, tipo: str, consumidor: object) -> threading.Thread:
+        """Cria a thread *daemon* que roda o laço do ``consumidor`` do ``tipo``."""
+        if tipo == _TIPO_STANDARD:
+            alvo: Callable[[], None] = lambda: self._executar_standard(consumidor)  # type: ignore[arg-type]
+            nome = f"standard-{consumidor.consumer_id}"  # type: ignore[attr-defined]
+        else:
+            alvo = lambda: self._executar_fifo(consumidor)  # type: ignore[arg-type]
+            nome = f"fifo-{consumidor.consumer_id}"  # type: ignore[attr-defined]
+        return threading.Thread(target=alvo, name=nome, daemon=True)
+
     def iniciar(self) -> None:
-        """Inicia as threads dos consumidores Standard e FIFO (Req. 8.1, 8.2).
+        """Inicia os slots dos consumidores e a thread supervisora (Req. 8.1, 8.2).
 
         Lê o número de instâncias de cada tipo do estado em memória (Req. 10.1, 10.2)
-        e cria uma thread *daemon* por instância. Idempotente dentro de uma mesma
-        composição: chamar :meth:`iniciar` com threads já ativas não as duplica.
+        e cria um slot (consumidor + thread *daemon*) por instância. Idempotente: se
+        já há slots, retorna sem recriar (não duplica consumidores).
         """
-        if self._threads:
+        if self._slots:
             return
         self._parada.clear()
 
         total_standard = self.estado_instancias.instancias(TIPO_CONSUMIDOR_STANDARD)
         total_fifo = self.estado_instancias.instancias(TIPO_CONSUMIDOR_FIFO)
 
-        for _ in range(total_standard):
-            consumidor = criar_consumidor_standard(self.gateway, self.historico)
-            self._consumidores_standard.append(consumidor)
-            thread = threading.Thread(
-                target=self._executar_standard,
-                args=(consumidor,),
-                name=f"standard-{consumidor.consumer_id}",
-                daemon=True,
-            )
-            self._threads.append(thread)
-            thread.start()
+        for tipo, total in ((_TIPO_STANDARD, total_standard), (_TIPO_FIFO, total_fifo)):
+            for _ in range(total):
+                consumidor = self._criar_consumidor(tipo)
+                thread = self._criar_thread(tipo, consumidor)
+                self._slots.append(
+                    _SlotConsumidor(tipo=tipo, consumidor=consumidor, thread=thread)
+                )
+                thread.start()
 
-        for _ in range(total_fifo):
-            consumidor = ConsumidorFifo(
-                sqs=self.gateway,
-                historico=self.historico,
-                consumer_id=gerar_consumer_id("consumidor-fifo"),
-            )
-            self._consumidores_fifo.append(consumidor)
-            thread = threading.Thread(
-                target=self._executar_fifo,
-                args=(consumidor,),
-                name=f"fifo-{consumidor.consumer_id}",
-                daemon=True,
-            )
-            self._threads.append(thread)
-            thread.start()
+        # Thread supervisora: recria slots mortos respeitando o critério de parada.
+        self._supervisor = threading.Thread(
+            target=self.supervisionar,
+            name="supervisor-consumidores",
+            daemon=True,
+        )
+        self._supervisor.start()
 
     def _executar_standard(self, consumidor: ConsumidorStandard) -> None:
-        """Roda o laço do Consumidor_Standard até o sinal de parada (Req. 8.1)."""
-        consumidor.executar(continuar=lambda: not self._deve_parar())
+        """Roda o laço do Consumidor_Standard até o sinal de parada (Req. 8.1).
+
+        Uma guarda externa garante que, mesmo que o laço escape com uma exceção
+        inesperada (que não seja a parada cooperativa), a thread termine
+        normalmente — sem propagar a exceção ao runtime — e registre o encerramento
+        de forma estruturada para que o supervisor possa recriar o slot.
+        """
+        try:
+            consumidor.executar(continuar=lambda: not self._deve_parar())
+        except Exception as e:  # NÃO captura BaseException (parada cooperativa).
+            log_evento(
+                logging.ERROR,
+                "consumidor_encerrou_por_erro",
+                tipo=_TIPO_STANDARD,
+                consumer_id=consumidor.consumer_id,
+                erro=repr(e),
+            )
+            return
 
     def _executar_fifo(self, consumidor: ConsumidorFifo) -> None:
-        """Roda o laço do Consumidor_FIFO até o sinal de parada (Req. 8.2)."""
-        consumidor.executar(criterio_parada=self._deve_parar)
+        """Roda o laço do Consumidor_FIFO até o sinal de parada (Req. 8.2).
+
+        Mesma guarda externa do Standard: a thread encerra normalmente mesmo diante
+        de uma exceção inesperada, registrando o encerramento para o supervisor.
+        """
+        try:
+            consumidor.executar(criterio_parada=self._deve_parar)
+        except Exception as e:  # NÃO captura BaseException (parada cooperativa).
+            log_evento(
+                logging.ERROR,
+                "consumidor_encerrou_por_erro",
+                tipo=_TIPO_FIFO,
+                consumer_id=consumidor.consumer_id,
+                erro=repr(e),
+            )
+            return
+
+    # ------------------------------------------------------------------
+    # Supervisão e recriação de slots
+    # ------------------------------------------------------------------
+    def supervisionar(self) -> None:
+        """Laço da thread supervisora: recria slots mortos até o sinal de parada.
+
+        A cada :data:`~app.dominio.constantes.INTERVALO_SUPERVISAO_SEGUNDOS` o laço
+        acorda (via ``Event.wait`` com *timeout*, para despertar imediatamente no
+        *shutdown*) e percorre os slots. Para cada slot cuja thread morreu, que não
+        está em parada e que ainda não foi marcado como ``degradado``, chama
+        :meth:`_recriar_slot`. Nunca cria uma segunda thread para um slot vivo (uma
+        thread viva por slot).
+        """
+        while not self._deve_parar():
+            # Dorme o intervalo, mas acorda imediatamente se a parada for sinalizada.
+            if self._parada.wait(timeout=c.INTERVALO_SUPERVISAO_SEGUNDOS):
+                break
+            with self._lock:
+                if self._deve_parar():
+                    break
+                for slot in self._slots:
+                    if (
+                        not slot.thread.is_alive()
+                        and not self._deve_parar()
+                        and not slot.degradado
+                    ):
+                        self._recriar_slot(slot)
+
+    def _recriar_slot(self, slot: _SlotConsumidor) -> None:
+        """Recria o consumidor+thread de um slot morto, aplicando o teto de reinícios.
+
+        Cria uma nova instância (novo ``consumer_id``) e thread no mesmo slot,
+        registra o *timestamp* do reinício, descarta os marcos fora da janela de
+        observação e incrementa o contador. Se o número de reinícios dentro de
+        :data:`~app.dominio.constantes.JANELA_REINICIOS_SEGUNDOS` exceder
+        :data:`~app.dominio.constantes.MAX_REINICIOS_JANELA`, marca o slot como
+        ``degradado`` e para de reiniciá-lo (falha persistente).
+
+        Deve ser chamado com :attr:`_lock` já adquirido.
+        """
+        agora = time.monotonic()
+        # Mantém apenas os marcos dentro da janela deslizante de observação.
+        slot.marcos_reinicio = [
+            t for t in slot.marcos_reinicio if agora - t <= c.JANELA_REINICIOS_SEGUNDOS
+        ]
+        slot.marcos_reinicio.append(agora)
+        slot.reinicios += 1
+
+        if len(slot.marcos_reinicio) > c.MAX_REINICIOS_JANELA:
+            slot.degradado = True
+            log_evento(
+                logging.ERROR,
+                "consumidor_em_falha_persistente",
+                tipo=slot.tipo,
+                consumer_id=getattr(slot.consumidor, "consumer_id", None),
+                reinicios=slot.reinicios,
+                janela_segundos=c.JANELA_REINICIOS_SEGUNDOS,
+            )
+            return
+
+        consumidor = self._criar_consumidor(slot.tipo)
+        thread = self._criar_thread(slot.tipo, consumidor)
+        slot.consumidor = consumidor
+        slot.thread = thread
+        log_evento(
+            logging.WARNING,
+            "consumidor_reiniciado",
+            tipo=slot.tipo,
+            consumer_id=consumidor.consumer_id,  # type: ignore[attr-defined]
+            reinicios=slot.reinicios,
+        )
+        thread.start()
 
     def parar(self, *, timeout: Optional[float] = 5.0) -> None:
         """Sinaliza a parada cooperativa e aguarda o término das threads.
 
-        Chamado no *shutdown* da aplicação. Como os laços só verificam o sinal entre
-        iterações (e o recebimento usa Long_Polling), o ``timeout`` evita que o
-        encerramento fique bloqueado por uma espera de recebimento em andamento.
+        Ordem de encerramento (determinística):
+
+        1. sinaliza o ``Event`` de parada;
+        2. chama ``parar()`` em cada :class:`ConsumidorStandard`;
+        3. encerra e faz *join* da thread supervisora **antes** dos slots (para que
+           ela não recrie nenhum slot durante o *shutdown*);
+        4. faz *join* (com ``timeout``) em cada thread de slot;
+        5. limpa a lista de slots.
         """
         self._parada.set()
-        for consumidor in self._consumidores_standard:
-            consumidor.parar()
-        for thread in self._threads:
-            thread.join(timeout=timeout)
-        self._threads.clear()
-        self._consumidores_standard.clear()
-        self._consumidores_fifo.clear()
+
+        for slot in self._slots:
+            if isinstance(slot.consumidor, ConsumidorStandard):
+                slot.consumidor.parar()
+
+        # (3) A supervisora é encerrada ANTES dos slots: sem recriação no shutdown.
+        if self._supervisor is not None:
+            self._supervisor.join(timeout=timeout)
+            self._supervisor = None
+
+        for slot in self._slots:
+            slot.thread.join(timeout=timeout)
+
+        self._slots.clear()
+
+    # ------------------------------------------------------------------
+    # Exposição de estado (consumido pelo endpoint de saúde — FEAT-004)
+    # ------------------------------------------------------------------
+    def estado_slots(self) -> list[EstadoSlotConsumidor]:
+        """Devolve uma visão do estado atual de cada slot (tipo, id, vivo, etc.).
+
+        Método público e seguro para o endpoint de saúde iterar os slots sem acessar
+        a estrutura interna. Reflete, em cada chamada, se a thread está viva, se o
+        slot está degradado e quantos reinícios já ocorreram.
+        """
+        with self._lock:
+            return [
+                EstadoSlotConsumidor(
+                    tipo=slot.tipo,
+                    consumer_id=getattr(slot.consumidor, "consumer_id", ""),
+                    vivo=slot.thread.is_alive(),
+                    degradado=slot.degradado,
+                    reinicios=slot.reinicios,
+                )
+                for slot in self._slots
+            ]
 
     @property
     def quantidade_threads(self) -> int:
-        """Número de threads de consumidor atualmente gerenciadas (útil em testes)."""
-        return len(self._threads)
+        """Número de threads de consumidor (slots) atualmente gerenciadas.
+
+        Conta os slots gerenciados (uma thread de consumidor por slot). Após
+        :meth:`parar` a lista de slots é esvaziada, então volta a 0. Não inclui a
+        thread supervisora.
+        """
+        return len(self._slots)
 
 
 # ---------------------------------------------------------------------------

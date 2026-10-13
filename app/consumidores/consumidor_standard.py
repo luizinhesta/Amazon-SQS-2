@@ -47,6 +47,7 @@ Referências de requisitos: 8.1, 8.11, 10.4, 14.5.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -66,6 +67,7 @@ from app.consumidores.processamento import (
     processar_mensagem,
 )
 from app.dominio import constantes as c
+from app.observabilidade.log_estruturado import log_evento
 
 # ---------------------------------------------------------------------------
 # Tipos dos callables injetáveis
@@ -142,6 +144,13 @@ class EstatisticasConsumo:
     rejeitadas_por_validacao: int = 0
     erros_historico: int = 0
     falhas_processamento: int = 0
+    # Número de iterações do laço em que uma exceção pontual foi capturada pela
+    # guarda por iteração (uma falha de SQS/DynamoDB não encerra a thread).
+    iteracoes_com_erro: int = 0
+    # Número de mensagens cujo processamento terminou, mas o DeleteMessage não foi
+    # confirmado (ReceiptHandle expirado / falha de infra). Contado separadamente
+    # das falhas de processamento (o negócio foi executado, só a exclusão não).
+    exclusoes_nao_confirmadas: int = 0
 
 
 @dataclass
@@ -238,7 +247,19 @@ class ConsumidorStandard:
 
             iteracao += 1
             self.estatisticas.iteracoes += 1
-            self._executar_iteracao()
+            try:
+                self._executar_iteracao()
+            except Exception as e:  # NÃO captura BaseException (parada cooperativa).
+                # Uma falha pontual de SQS/DynamoDB não deve encerrar a thread do
+                # consumidor: registramos de forma estruturada e seguimos o laço.
+                self.estatisticas.iteracoes_com_erro += 1
+                log_evento(
+                    logging.WARNING,
+                    "iteracao_consumidor_falhou",
+                    consumer_id=self.consumer_id,
+                    fila=self.nome_fila,
+                    erro=repr(e),
+                )
 
         return self.estatisticas
 
@@ -320,6 +341,11 @@ class ConsumidorStandard:
 
         if resultado.sucesso:
             self.estatisticas.processadas_com_sucesso += 1
+        elif resultado.exclusao_nao_confirmada:
+            # O processamento de negócio terminou, mas o DeleteMessage não foi
+            # confirmado (ReceiptHandle expirado / falha de infra). NÃO é uma falha
+            # de processamento: contabiliza em contador dedicado.
+            self.estatisticas.exclusoes_nao_confirmadas += 1
         else:
             self.estatisticas.falhas_processamento += 1
 

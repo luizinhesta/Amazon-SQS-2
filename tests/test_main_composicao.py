@@ -267,3 +267,150 @@ def test_gerenciador_inicia_threads_por_instancia_configurada() -> None:
     finally:
         gerenciador.parar(timeout=2.0)
     assert gerenciador.quantidade_threads == 0
+
+
+# --- GerenciadorConsumidores: resiliência (slots + supervisor + reinício) ---
+
+
+def test_iniciar_e_idempotente_nao_duplica_slots() -> None:
+    estado = EstadoInstanciasConsumidores(standard=1, fifo=1)
+    gateway = MagicMock()
+    gateway.receive_messages.return_value = []
+
+    gerenciador = GerenciadorConsumidores(
+        gateway=gateway, historico=MagicMock(), estado_instancias=estado
+    )
+    try:
+        gerenciador.iniciar()
+        gerenciador.iniciar()  # segunda chamada: não deve duplicar
+        assert gerenciador.quantidade_threads == 2
+    finally:
+        gerenciador.parar(timeout=2.0)
+
+
+def test_estado_slots_expoe_tipo_id_e_vivo() -> None:
+    estado = EstadoInstanciasConsumidores(standard=1, fifo=1)
+    gateway = MagicMock()
+    gateway.receive_messages.return_value = []
+
+    gerenciador = GerenciadorConsumidores(
+        gateway=gateway, historico=MagicMock(), estado_instancias=estado
+    )
+    try:
+        gerenciador.iniciar()
+        estados = gerenciador.estado_slots()
+        tipos = sorted(s.tipo for s in estados)
+        assert tipos == ["fifo", "standard"]
+        assert all(s.consumer_id for s in estados)
+        assert all(s.degradado is False and s.reinicios == 0 for s in estados)
+    finally:
+        gerenciador.parar(timeout=2.0)
+
+
+def test_supervisor_recria_slot_morto_sem_duplicar() -> None:
+    import time as _time
+
+    from app.dominio import constantes as const
+
+    # Encurta o intervalo de supervisão para o teste rodar rápido.
+    original = const.INTERVALO_SUPERVISAO_SEGUNDOS
+    const.INTERVALO_SUPERVISAO_SEGUNDOS = 0.05
+
+    gateway = MagicMock()
+    gateway.receive_messages.return_value = []
+    estado = EstadoInstanciasConsumidores(standard=1, fifo=0)
+
+    # Primeira instância criada "morre" assim que roda (executar retorna de imediato),
+    # simulando uma thread encerrada inesperadamente; as instâncias seguintes rodam o
+    # laço cooperativo normal. Assim o supervisor observa o slot morto e o recria.
+    class _GerenciadorComMorteInicial(GerenciadorConsumidores):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.criados = 0
+
+        def _criar_consumidor(self, tipo):
+            consumidor = super()._criar_consumidor(tipo)
+            self.criados += 1
+            if self.criados == 1:
+                # Força a primeira thread a encerrar imediatamente (slot morto).
+                consumidor.executar = lambda **_k: None  # type: ignore[attr-defined]
+            return consumidor
+
+    gerenciador = _GerenciadorComMorteInicial(
+        gateway=gateway, historico=MagicMock(), estado_instancias=estado
+    )
+    try:
+        gerenciador.iniciar()
+        id_inicial = gerenciador.estado_slots()[0].consumer_id
+        # Aguarda o supervisor recriar o slot morto (novo consumer_id, thread viva).
+        prazo = _time.monotonic() + 3.0
+        while _time.monotonic() < prazo:
+            estados = gerenciador.estado_slots()
+            if estados and estados[0].reinicios >= 1 and estados[0].vivo:
+                break
+            _time.sleep(0.05)
+        estados = gerenciador.estado_slots()
+        # Continua havendo exatamente UM slot (sem duplicar) e com novo id.
+        assert gerenciador.quantidade_threads == 1
+        assert estados[0].reinicios >= 1
+        assert estados[0].consumer_id != id_inicial
+        assert estados[0].vivo is True
+    finally:
+        gerenciador.parar(timeout=2.0)
+        const.INTERVALO_SUPERVISAO_SEGUNDOS = original
+
+
+def test_supervisor_marca_degradado_ao_exceder_teto_de_reinicios() -> None:
+    import time as _time
+
+    from app.dominio import constantes as const
+
+    original_intervalo = const.INTERVALO_SUPERVISAO_SEGUNDOS
+    const.INTERVALO_SUPERVISAO_SEGUNDOS = 0.02
+
+    gateway = MagicMock()
+    gateway.receive_messages.return_value = []
+    estado = EstadoInstanciasConsumidores(standard=1, fifo=0)
+
+    # TODAS as instâncias "morrem" na hora: o supervisor reinicia repetidamente até
+    # exceder MAX_REINICIOS_JANELA e marcar o slot como degradado (para de reiniciar).
+    class _GerenciadorSempreMorto(GerenciadorConsumidores):
+        def _criar_consumidor(self, tipo):
+            consumidor = super()._criar_consumidor(tipo)
+            consumidor.executar = lambda **_k: None  # type: ignore[attr-defined]
+            return consumidor
+
+    gerenciador = _GerenciadorSempreMorto(
+        gateway=gateway, historico=MagicMock(), estado_instancias=estado
+    )
+    try:
+        gerenciador.iniciar()
+        prazo = _time.monotonic() + 3.0
+        while _time.monotonic() < prazo:
+            estados = gerenciador.estado_slots()
+            if estados and estados[0].degradado:
+                break
+            _time.sleep(0.02)
+        estados = gerenciador.estado_slots()
+        assert estados[0].degradado is True
+        # Excedeu o teto da janela: não reinicia além do limite esperado.
+        assert estados[0].reinicios >= const.MAX_REINICIOS_JANELA
+    finally:
+        gerenciador.parar(timeout=2.0)
+        const.INTERVALO_SUPERVISAO_SEGUNDOS = original_intervalo
+
+
+def test_parar_nao_recria_slots_e_zera_quantidade() -> None:
+    estado = EstadoInstanciasConsumidores(standard=1, fifo=1)
+    gateway = MagicMock()
+    gateway.receive_messages.return_value = []
+
+    gerenciador = GerenciadorConsumidores(
+        gateway=gateway, historico=MagicMock(), estado_instancias=estado
+    )
+    gerenciador.iniciar()
+    gerenciador.parar(timeout=2.0)
+
+    # Após parar: sem slots, sem recriação, quantidade zerada e estado vazio.
+    assert gerenciador.quantidade_threads == 0
+    assert gerenciador.estado_slots() == []
