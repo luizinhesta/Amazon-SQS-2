@@ -25,6 +25,8 @@ Esse laboratório preenche essa lacuna: cada ação (envio, recebimento, process
 
 ## Arquitetura
 
+![Descrição da imagem](<imagens/imagem%20(13).png>)
+
 Tudo roda em uma única EC2: a API (FastAPI), o Dashboard estático e os dois consumidores em threads de segundo plano. A AWS é acessada por `boto3` com credenciais temporárias da IAM Role — nenhuma chave fixa em lugar nenhum. Os recursos AWS são criados **manualmente** no Console (sem IaC); a aplicação só verifica se existem e os usa, nunca cria nem apaga nada.
 
 ![Visão geral da arquitetura do laboratório](<imagens/Visão Geral do Laboratório Amazon SQS.png>)
