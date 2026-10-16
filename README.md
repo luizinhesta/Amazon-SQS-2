@@ -1,6 +1,8 @@
-# Laboratório didático de Amazon SQS
+# Amazon SQS — Desacoplamento e Processamento Assíncrono
 
 > Artigo técnico de portfólio sobre o estudo prático de **Amazon SQS** para a certificação **AWS Solutions Architect Associate (SAA)**.
+
+![Descrição da imagem](<imagens/imagem%20(1).png>)
 
 Este projeto é um laboratório web que demonstra, de forma visual e honesta, o ciclo de vida completo das mensagens em filas **Amazon SQS**: envio, recebimento, processamento, falhas, reprocessamento e encaminhamento para **Dead-Letter Queue (DLQ)** — tanto no fluxo **Standard** quanto no fluxo **FIFO**. A aplicação roda em uma instância **Amazon EC2** Linux na região `us-east-1`, autentica-se na AWS exclusivamente pela IAM Role da instância (sem Access Keys fixas) e registra cada evento no **Amazon DynamoDB**, porque o SQS não oferece uma API para consultar o estado individual de todas as mensagens.
 

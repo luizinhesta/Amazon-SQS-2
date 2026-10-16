@@ -1,4 +1,4 @@
-# Arquitetura — Laboratório Amazon SQS
+# Arquitetura — Amazon SQS — Desacoplamento e Processamento Assíncrono
 
 > Documento de arquitetura do laboratório didático de **Amazon SQS** voltado ao estudo da certificação **AWS Solutions Architect Associate (SAA)**. Descreve apenas o que existe de fato no projeto (código em `app/` e `web/`) e os recursos AWS que a aplicação **usa** — ela nunca cria, modifica nem exclui recursos AWS.
 

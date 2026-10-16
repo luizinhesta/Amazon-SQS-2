@@ -1,4 +1,4 @@
-﻿# Guia de Implantação Manual — Laboratório Amazon SQS
+﻿# Guia de Implantação - Amazon SQS — Desacoplamento e Processamento Assíncrono
 
 Este documento descreve, passo a passo e em ordem sequencial, como criar **manualmente no Console AWS** toda a infraestrutura do laboratório didático de Amazon SQS e como instalar e operar a aplicação na instância EC2. Todos os recursos são criados pelo próprio usuário no Console AWS; a aplicação **nunca cria, modifica ou exclui recursos AWS** e **não utiliza Infrastructure as Code** (Terraform, CloudFormation ou CDK).
 
