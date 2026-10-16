@@ -100,12 +100,6 @@ Desktop.ini
 .agents/
 
 # --------------------------------------------------------------------------
-# Imagens auxiliares (prints de tela, capturas de apoio). Não são necessárias
-# para criar ou executar o projeto.
-# --------------------------------------------------------------------------
-imagens/
-
-# --------------------------------------------------------------------------
 # Specs internas e planos de tarefas — não expostos no repositório público.
 # --------------------------------------------------------------------------
 .kiro/specs/aws-sqs-lab/
