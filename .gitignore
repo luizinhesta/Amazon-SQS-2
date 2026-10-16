@@ -93,6 +93,20 @@ Thumbs.db
 Desktop.ini
 
 # --------------------------------------------------------------------------
+# Artefatos internos do agente/workflow (design, plano, reviews, features).
+# Não fazem parte do código do projeto nem são necessários para criar/rodar
+# a aplicação.
+# --------------------------------------------------------------------------
+.agents/
+
+# --------------------------------------------------------------------------
+# Imagens auxiliares (prints de tela, capturas de apoio). Não são necessárias
+# para criar ou executar o projeto.
+# --------------------------------------------------------------------------
+imagens/
+
+# --------------------------------------------------------------------------
 # Observação: a pasta .kiro/ (specs do projeto) É versionada
 # intencionalmente e NÃO deve ser ignorada.
+# O arquivo tasks.md (raiz) É versionado intencionalmente (usado pelo projeto).
 # --------------------------------------------------------------------------
