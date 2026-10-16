@@ -1,128 +1,123 @@
-# Amazon SQS — Desacoplamento e Processamento Assíncrono
+# Amazon SQS na prática — Desacoplamento e Processamento Assíncrono
 
-> Artigo técnico de portfólio sobre o estudo prático de **Amazon SQS** para a certificação **AWS Solutions Architect Associate (SAA)**.
+> Laboratório web didático que mostra, de ponta a ponta e sem "mágica", o ciclo de vida das mensagens no **Amazon SQS** — filas **Standard** e **FIFO**, falhas, reentrega, DLQ e reprocessamento. Projeto de estudo para a certificação **AWS Solutions Architect Associate (SAA)**.
 
-![Descrição da imagem](<imagens/imagem%20(1).png>)
+![Amazon SQS — Desacoplamento e Processamento Assíncrono](<imagens/imagem (1).png>)
 
-Este projeto é um laboratório web que demonstra, de forma visual e honesta, o ciclo de vida completo das mensagens em filas **Amazon SQS**: envio, recebimento, processamento, falhas, reprocessamento e encaminhamento para **Dead-Letter Queue (DLQ)** — tanto no fluxo **Standard** quanto no fluxo **FIFO**. A aplicação roda em uma instância **Amazon EC2** Linux na região `us-east-1`, autentica-se na AWS exclusivamente pela IAM Role da instância (sem Access Keys fixas) e registra cada evento no **Amazon DynamoDB**, porque o SQS não oferece uma API para consultar o estado individual de todas as mensagens.
+A aplicação roda em uma instância **Amazon EC2** em `us-east-1`, autentica na AWS **só** pela IAM Role da instância (sem Access Keys) e registra cada passo do ciclo de vida das mensagens no **Amazon DynamoDB**. Um Dashboard em português mostra tudo acontecendo em tempo real.
 
-Para os detalhes complementares, consulte os documentos que acompanham este repositório: [`ARQUITETURA.md`](ARQUITETURA.md) (visão aprofundada da arquitetura e dos componentes), [`IMPLANTACAO.md`](IMPLANTACAO.md) (passo a passo de criação manual dos recursos no Console AWS e implantação na EC2) e [`TESTES.md`](TESTES.md) (estratégia e execução da suíte de testes).
+Documentos complementares: [`ARQUITETURA.md`](ARQUITETURA.md) · [`IMPLANTACAO.md`](IMPLANTACAO.md) · [`TESTES.md`](TESTES.md)
 
 ---
 
-## 1. Amazon SQS (o que é)
+## O problema que este projeto resolve
 
-O **Amazon Simple Queue Service (SQS)** é um serviço gerenciado de filas de mensagens que desacopla produtores e consumidores de um sistema distribuído. Em vez de um componente chamar o outro diretamente, o produtor envia uma mensagem para a fila e o consumidor a recebe quando estiver pronto, o que absorve picos de carga, aumenta a resiliência e permite escalar cada lado de forma independente. Por ser totalmente gerenciado, o SQS cuida de disponibilidade, durabilidade e escala, cobrando por requisição e sem exigir gestão de servidores.
+O SQS entrega mensagens muito bem, mas tem uma limitação que surpreende quem está começando: **ele não guarda o estado individual de cada mensagem**. Não existe uma API do tipo "me diga onde está a mensagem X e por quais etapas ela passou". Você consegue enviar, receber e excluir — mas a história de cada mensagem se perde.
 
-Neste laboratório, o SQS é o coração do fluxo: o backend envia mensagens via `boto3` (`SendMessage`), os consumidores as recebem (`ReceiveMessage`), simulam o processamento e, em caso de sucesso, as removem (`DeleteMessage`). O ponto didático central é que o SQS entrega mensagens, mas **não** mantém um estado consultável por mensagem — por isso a aplicação complementa o SQS com um log de eventos próprio no DynamoDB.
+Esse laboratório preenche essa lacuna: cada ação (envio, recebimento, processamento, falha, exclusão, ida para a DLQ) vira um **evento registrado no DynamoDB**. O estado de cada mensagem é **derivado** desses eventos, nunca inventado. O resultado é uma linha do tempo honesta, que separa o que foi **observado** (um `ReceiveMessage` real) do que foi apenas **inferido** (a provável expiração de um Visibility Timeout, que o SQS não confirma).
 
-## 2. Standard vs FIFO
+## Como funciona, em 4 passos
 
-As filas **Standard** priorizam vazão praticamente ilimitada e entrega *at-least-once*. Em troca, não garantem ordenação e podem entregar a mesma mensagem mais de uma vez, o que torna a **idempotência** no consumidor uma necessidade real, e não um detalhe opcional. É o modelo adequado quando a ordem não importa e o sistema tolera (ou neutraliza) duplicatas.
+1. **Envio** — pelo Dashboard, você dispara de 1 a 10 mensagens escolhendo a fila, o `order_id`, o tempo de processamento simulado, um cenário de falha e (no FIFO) o `MessageGroupId`.
+2. **Consumo** — os consumidores Standard e FIFO recebem as mensagens com Long Polling, checam idempotência por `order_id`, simulam o processamento e, só em caso de sucesso, excluem a mensagem.
+3. **Registro** — cada passo grava um evento no DynamoDB (`enviada`, `recebida`, `processada`, `excluida`, `encaminhada_dlq`, etc.).
+4. **Observação** — o Dashboard lê esses eventos, deriva o estado de cada mensagem e mostra estatísticas, linha do tempo e saúde dos consumidores.
 
-As filas **FIFO** (First-In-First-Out) garantem ordenação dentro de cada `MessageGroupId` e entrega *exactly-once* dentro da janela de deduplicação, ao custo de uma vazão menor que a Standard. O laboratório materializa essa diferença com duas filas reais — `lab-sqs-standard` e `lab-sqs-fifo.fifo` — cada uma com sua própria DLQ, e com consumidores distintos (`Consumidor_Standard` e `Consumidor_FIFO`). O Dashboard apresenta as estatísticas dos dois fluxos lado a lado, com rótulos separados, para que a comparação entre entrega ordenada e entrega de alta vazão fique evidente.
+## Arquitetura
 
-## 3. Visibility_Timeout
+Tudo roda em uma única EC2: a API (FastAPI), o Dashboard estático e os dois consumidores em threads de segundo plano. A AWS é acessada por `boto3` com credenciais temporárias da IAM Role — nenhuma chave fixa em lugar nenhum. Os recursos AWS são criados **manualmente** no Console (sem IaC); a aplicação só verifica se existem e os usa, nunca cria nem apaga nada.
 
-O **Visibility_Timeout** é o período durante o qual uma mensagem recebida fica invisível para os demais consumidores. Enquanto o consumidor processa, a mensagem some da fila para evitar processamento concorrente; se ele concluir e chamar `DeleteMessage` dentro desse prazo, a mensagem desaparece de vez. Se o prazo expirar sem exclusão — porque o processamento demorou demais, falhou ou o consumidor foi interrompido — a mensagem volta a ficar visível e será reentregue, com o `ApproximateReceiveCount` incrementado.
+![Visão geral da arquitetura do laboratório](<imagens/Visão Geral do Laboratório Amazon SQS.png>)
 
-No laboratório o valor inicial é de **30 segundos**, configurado manualmente na fila (Config_Aplicada). O cenário de "processamento mais longo que o Visibility_Timeout" demonstra exatamente a reentrega: a mensagem reaparece e a contagem de recebimentos sobe. Vale destacar uma decisão de design importante: a expiração do Visibility_Timeout em si é tratada como **Evento_Inferido** (`provavel_expiracao_visibility`), pois o SQS não emite confirmação direta dela; já a reentrega subsequente é um **Evento_Observado**, porque corresponde a um novo `ReceiveMessage` concreto.
+| Componente | Papel |
+|---|---|
+| **Amazon EC2** (`lab-sqs-ec2`) | Hospeda API, Dashboard e os consumidores Standard/FIFO |
+| **Amazon SQS** | 4 filas: `lab-sqs-standard`, `lab-sqs-fifo.fifo` e suas DLQs, com Redrive Policy |
+| **Amazon DynamoDB** (`lab-sqs-historico`) | Log de eventos append-only — a fonte de verdade do estado observável |
+| **AWS IAM** | Role de privilégio mínimo anexada à EC2 (sem Access Keys) |
+| **AWS Systems Manager** | Administração via Session Manager, com a porta 22 fechada |
 
-## 4. Retenção de mensagens
+O estado de cada mensagem (`Aguardando`, `Recebida`, `Em processamento`, `Processada`, `Exclusão não confirmada`, `Falha`, `Aguardando nova tentativa`, `Encaminhada para DLQ`) nunca é um campo gravado: é sempre **derivado** dos eventos por um componente puro (`StateDeriver`). A chave do DynamoDB usa `PK = PEDIDO#<order_id>` e `SK = EVENTO#<tempo>#<seq>` para a linha do tempo, mais um índice `GSI1` por fila para as estatísticas.
 
-O **período de retenção** define por quanto tempo o SQS guarda uma mensagem não excluída antes de descartá-la automaticamente. É uma salvaguarda contra mensagens que nunca são consumidas e um parâmetro de design relevante para DLQs, onde se quer tempo hábil para investigar e reprocessar falhas. O valor é configurado por fila e, como parâmetro de infraestrutura, só muda no Console AWS.
+<!-- Sugestão de screenshot: tela "Visão geral" do Dashboard (estatísticas Standard x FIFO lado a lado). -->
 
-Neste laboratório as filas principais usam retenção inicial de **4 dias** e as DLQs, de **14 dias** (ambos Config_Aplicada). A retenção mais longa nas DLQs reflete uma boa prática: mensagens que falharam precisam de uma janela maior de inspeção do que mensagens em trânsito no caminho feliz. O Dashboard exibe esses valores com rótulo de Config_Aplicada, deixando claro que são configurações reais dos recursos, não parâmetros de simulação da aplicação.
+## Conceitos de SQS que o laboratório demonstra
 
-## 5. Long_Polling
+Em vez de explicar cada conceito em páginas de texto, o lab deixa cada um **visível na prática**. Resumo de como aparecem:
 
-O **Long_Polling** instrui o `ReceiveMessage` a aguardar até `WaitTimeSeconds` por mensagens antes de responder, em vez de retornar imediatamente vazio (short polling). Isso reduz drasticamente a quantidade de chamadas "em branco" ao SQS, diminui custo e latência percebida e evita o desperdício de requisições em filas pouco movimentadas. Quando uma mensagem chega durante a espera, ela é entregue na hora.
+| Conceito | O que é | Como aparece no lab |
+|---|---|---|
+| **Standard vs FIFO** | Standard = alta vazão, sem ordem, *at-least-once*; FIFO = ordem por grupo, *exactly-once* na janela de dedupe | Duas filas reais, consumidores distintos, estatísticas lado a lado |
+| **Visibility Timeout** | Tempo que a mensagem fica invisível após ser recebida | 30 s; o cenário "processamento longo" mostra a reentrega com `ApproximateReceiveCount` subindo |
+| **Retenção** | Tempo que o SQS guarda a mensagem não consumida | 4 dias nas filas principais, 14 dias nas DLQs (mais tempo para investigar falhas) |
+| **Long Polling** | `ReceiveMessage` espera por mensagens em vez de voltar vazio | 20 s; retorno vazio é tratado como normal, sem erro |
+| **MessageGroupId** | Escopo da ordenação no FIFO | Um grupo por consumidor por vez; a ordem dentro do grupo é preservada |
+| **Deduplicação** | Evita reprocessar a mesma mensagem (por conteúdo ou por ID) | Dedupe por conteúdo ligada no FIFO; não confundir com a idempotência de negócio por `order_id` |
+| **DLQ + Redrive Policy** | Fila para mensagens que falharam N vezes | `maxReceiveCount = 2`; DLQ só é afirmada com presença **confirmada**, nunca por suposição |
 
-Os consumidores do laboratório usam Long_Polling com `WaitTimeSeconds` de **20 segundos** (Config_Aplicada), e tratam o retorno vazio como condição normal: simplesmente tentam de novo, sem registrar erro. Essa escolha é coerente com uma aplicação de laboratório que fica ociosa boa parte do tempo e só recebe tráfego quando o estudante dispara envios ou cenários.
+Um ponto de rigor do projeto: a **idempotência de negócio** (por `order_id`, guardada no DynamoDB) é diferente da deduplicação de transporte do FIFO (janela de 5 min, dentro do SQS). A idempotência vale inclusive para o Standard, que não tem dedupe nativo.
 
-## 6. MessageGroupId
+## Um bug real que corrigimos (e o que ele ensina)
 
-O **MessageGroupId** é um identificador obrigatório em filas FIFO que define o escopo da ordenação. Mensagens com o mesmo `MessageGroupId` são entregues e processadas estritamente na ordem de envio; mensagens de grupos diferentes podem ser processadas em paralelo. Isso permite ordenar o que precisa ser ordenado (por exemplo, todos os eventos de um mesmo pedido) sem serializar o sistema inteiro.
+Durante os testes do FIFO apareceu uma falha de verdade: com processamento de **45 s** e Visibility Timeout de **30 s**, o `ReceiptHandle` expirava antes do consumidor chamar `DeleteMessage`. O SQS respondia `InvalidParameterValue` ("receipt handle has expired"), a exceção subia pela thread e **matava o consumidor** — a fila voltava a ter mensagens e nenhum consumidor ativo.
 
-No `Consumidor_FIFO`, a regra adotada é processar **um único MessageGroupId por instância por vez**, preservando a ordem de recebimento dentro do grupo. O SQS FIFO garante que mensagens de um grupo não são entregues a outro consumidor enquanto a anterior não for excluída (ou seu Visibility_Timeout expirar); combinando essa garantia com o processamento single-group por instância, a ordem é mantida ponta a ponta. O Dashboard tem uma visão de comparação por grupos que mostra a sequência de processamento por `MessageGroupId` e qual consumidor atendeu cada mensagem.
+A correção ataca o problema em quatro frentes, sem tocar na AWS e preservando os cenários didáticos:
 
-## 7. Deduplicação (dedupe por ID e por conteúdo)
+- **Ordem invertida + novo estado.** O `DeleteMessage` passa a ser tentado **antes** de registrar `processada`. Se o delete falha por erro de infraestrutura, grava-se o estado **Exclusão não confirmada** (não terminal) com o erro original — e **nunca** `excluida` sem confirmação. Na reentrega, a idempotência libera o reprocessamento e o delete é concluído com um handle válido.
+- **Supervisão por slots.** Cada consumidor ganhou uma guarda por iteração: uma exceção é logada e o laço continua, em vez de morrer. Uma thread supervisora recria apenas threads mortas (sem duplicar), com teto anti-tempestade.
+- **Endpoint de saúde.** `GET /api/consumidores/saude` lê só o estado em memória e informa se cada consumidor está vivo, degradado e quantas vezes reiniciou.
+- **Faixas diferenciadas no Dashboard.** A faixa de status distingue, por precedência: API indisponível (vermelha) → consumidor em falha (amarela) → timeout de cálculo (laranja) → sucesso.
 
-Filas FIFO oferecem **deduplicação** dentro de uma janela de 5 minutos, evitando que a mesma mensagem seja processada duas vezes quando reenviada nesse intervalo. Existem duas estratégias: deduplicação **por conteúdo** (*content-based deduplication*), em que o SQS calcula um hash do corpo da mensagem e o usa como chave de dedupe; e deduplicação **por ID**, em que o produtor fornece explicitamente um `MessageDeduplicationId`.
+A lição vale ouro: **nunca tratar uma chamada que falhou como se tivesse dado certo**, e projetar consumidores que sobrevivem a falhas pontuais de rede ou da AWS.
 
-O laboratório usa, por padrão, a **Deduplicacao_Por_Conteudo** nas filas FIFO (Config_Aplicada). Quando ela está desabilitada, a aplicação permite informar manualmente o `MessageDeduplicationId` (de 1 a 128 caracteres) no envio. É importante não confundir essa deduplicação de **transporte** (janela curta, no SQS) com a **idempotência de negócio** por `order_id` (ver seção 11), que a aplicação garante de forma independente e duradoura via DynamoDB — inclusive para o fluxo Standard, que não tem dedupe nativo.
+## O que você aprende com este projeto
 
-## 8. DLQ (Dead-Letter Queue)
+- **O SQS não guarda estado por mensagem** — qualquer visão de "onde está cada mensagem" exige um repositório de observabilidade próprio (aqui, o DynamoDB).
+- **Observado ≠ inferido** — reentrega é fato (novo `ReceiveMessage`); expiração de Visibility Timeout é dedução. Tratar os dois como iguais produz uma linha do tempo enganosa.
+- **Idempotência não é opcional** — a entrega *at-least-once* do Standard torna a idempotência de negócio uma necessidade, não um detalhe.
+- **DLQ se confirma, não se adivinha** — o estado "Encaminhada para DLQ" só aparece com presença real na DLQ (`receive_count >= maxReceiveCount`).
+- **Resiliência de consumidor é design** — tratar erro de `DeleteMessage`, supervisionar threads e diferenciar tipos de falha são decisões de arquitetura, não remendos.
+- **Segurança por padrão** — IAM Role de privilégio mínimo, sem Access Keys, porta 22 fechada (Session Manager), SSE-SQS e login com bloqueio por origem.
 
-Uma **Dead-Letter Queue** é uma fila secundária para onde o SQS move automaticamente mensagens que falharam em ser processadas um número definido de vezes. A associação é feita pela **Redrive_Policy**, que aponta a fila principal para sua DLQ e define o `maxReceiveCount`: quando o `ApproximateReceiveCount` de uma mensagem atinge esse limite, a mensagem é transferida para a DLQ em vez de ser reentregue indefinidamente. Isso isola o "veneno" (mensagens problemáticas) do fluxo normal e dá um lugar seguro para análise.
+<!-- Sugestão de screenshot: tela "Histórico detalhado" do Dashboard (linha do tempo de uma mensagem, observado vs inferido). -->
+<!-- Sugestão de screenshot: tela "Laboratório de falhas" do Dashboard (cenários controlados). -->
 
-Neste laboratório cada fila principal tem sua DLQ (`lab-sqs-standard-dlq` e `lab-sqs-fifo-dlq.fifo`) com `maxReceiveCount` inicial de **2**. Um ponto de rigor que o projeto defende: a aplicação **nunca** afirma que uma mensagem foi para a DLQ só porque o Visibility_Timeout expirou. O estado "Encaminhada para DLQ" só é derivado quando a presença na DLQ é confirmada (Evento_Observado), com `receive_count >= maxReceiveCount`. O cenário de reprocessamento de DLQ move as mensagens de volta à fila principal e exibe o novo processamento, demonstrando o ciclo completo de recuperação.
+## Evidências reais
 
-## 9. Arquitetura da solução
+O projeto roda em recursos AWS de verdade. Algumas capturas do Console:
 
-A solução roda inteiramente em uma instância **EC2** Linux em `us-east-1`. O backend em Python expõe a `API_Backend` (FastAPI) e hospeda os processos `Consumidor_Standard` e `Consumidor_FIFO`, todos acessando a AWS por `boto3` com credenciais temporárias resolvidas automaticamente pela **IAM Role** da EC2 (sem Access Keys em código, config ou variáveis de ambiente). O `Dashboard` (HTML/CSS/JS) consome a API e apresenta cinco áreas em pt-BR: visão geral, envio, monitoramento, histórico detalhado e laboratório de falhas.
+**Instância EC2 em execução** (`lab-sqs-ec2`, t3.micro, com IAM Role anexada):
 
-O estado observável de cada mensagem **não** vem do SQS, e sim de um **log de eventos append-only** na `Tabela_Historico` (DynamoDB). Cada ação do ciclo de vida gera um item de evento; o **Estado** (`Aguardando`, `Recebida`, `Em processamento`, `Processada`, `Exclusão não confirmada`, `Falha`, `Aguardando nova tentativa`, `Encaminhada para DLQ`) é **derivado** desses eventos por um componente puro (`StateDeriver`), nunca armazenado como campo mutável. O estado `Exclusão não confirmada` (não terminal) sinaliza que o negócio concluiu mas o `DeleteMessage` falhou — ver a seção 9.1. A modelagem usa `PK = PEDIDO#<order_id>` e `SK = EVENTO#<app_time_ms>#<seq>` para a linha do tempo cronológica, e um índice global `GSI1` (`FILA#<queue_name>`) para as consultas por fila que alimentam estatísticas e monitoramento. Todos os recursos AWS são criados **manualmente** pelo usuário no Console (sem IaC); a aplicação apenas verifica a existência e a acessibilidade deles na inicialização e os utiliza — nunca cria, modifica ou exclui recursos. O detalhamento completo, com diagramas, está em [`ARQUITETURA.md`](ARQUITETURA.md).
+![EC2 em execução](<imagens/imagem (27).png>)
 
-## 9.1. Resiliência dos consumidores e tratamento de `DeleteMessage` falho
+**Tabela DynamoDB `lab-sqs-historico`** — o log de eventos (`event_source = OBSERVADO`, chave `PEDIDO#...` / `EVENTO#...`) que é a fonte de verdade do estado:
 
-Durante os testes do fluxo FIFO foi identificada uma falha real: com `Tempo_Processamento_Simulado` de 45 s e `Visibility_Timeout` de 30 s, o `ReceiptHandle` já havia expirado quando o consumidor chamava `DeleteMessage`. O SQS respondia com `InvalidParameterValue` ("The receipt handle has expired"), a exceção subia pela thread do `Consumidor_FIFO` e a **encerrava permanentemente** — a fila voltava a ter as mensagens disponíveis e nenhum consumidor ativo. A correção endereça esse comportamento em quatro frentes, sem tocar na AWS real e preservando todos os cenários didáticos.
+![Itens de evento no DynamoDB](<imagens/imagem (33).png>)
 
-**Reordenação `delete` → `processada` e novo estado `Exclusão não confirmada`.** O caminho de sucesso em `processar_mensagem` passou a tentar o `DeleteMessage` **antes** de registrar `processada`. Só após a exclusão ser confirmada é que os eventos `processada` e `excluida` são gravados. Se o `DeleteMessage` falhar por um erro de infraestrutura reconhecido (tipicamente `ReceiptHandle` expirado, mas também qualquer `ClientError`/`BotoCoreError`), a aplicação:
+**Monitoramento das DLQs no SQS** (métricas CloudWatch da DLQ Standard e da DLQ FIFO):
 
-- **não** encerra a thread do consumidor;
-- registra um novo Evento_Observado `exclusao_nao_confirmada` com o erro original da AWS em `error_detail`;
-- **nunca** registra `excluida` (nem `processada`) sem a confirmação do delete;
-- preserva a mensagem na fila para reentrega.
+![Monitoramento da DLQ Standard](<imagens/imagem (36).png>)
 
-O novo estado derivado **Exclusão não confirmada** é **não terminal** (não entra em `ESTADOS_TERMINAIS`, que segue com `Processada` e `Encaminhada para DLQ`). Isso garante que, numa reentrega posterior com um `ReceiptHandle` novo e válido, a idempotência por `order_id` **não** vê `processada` e autoriza o reprocessamento, que então confirma a exclusão. A mensagem deixa de ficar presa em loop até a DLQ, enquanto o comportamento didático de expiração proposital continua válido quando o processamento é propositalmente mais longo que o `Visibility_Timeout`.
+## Tecnologias
 
-**Supervisão por slots sem duplicar consumidores.** Cada consumidor passou a ter uma guarda por iteração: uma exceção pontual (SQS/DynamoDB) é registrada em log estruturado (nível `WARNING`) e o laço continua na próxima iteração, em vez de morrer. O `GerenciadorConsumidores` foi reescrito em torno de uma lista de **slots** (um por instância) com uma **thread supervisora** que detecta uma thread encerrada inesperadamente (`not thread.is_alive()`) e recria exatamente **uma** reposição no mesmo slot, com um novo `consumer_id`, sem nunca criar uma segunda thread para um slot vivo. Há um teto anti-tempestade (até 5 reinícios em 60 s); ao excedê-lo, o slot é marcado como `degradado`, registra `consumidor_em_falha_persistente` (nível `ERROR`) e para de reiniciar, para não mascarar um problema real. O encerramento (`parar()`) finaliza a supervisora **antes** dos slots, de modo que nenhuma recriação ocorra durante o shutdown.
+**Backend:** Python 3.10+, FastAPI, Uvicorn, boto3. **Frontend:** HTML/CSS/JS puro, organizado por área (`overview`, `send`, `monitoring`, `history`, `lab`). **AWS:** SQS, DynamoDB, EC2, IAM, Systems Manager. **Testes:** pytest, Hypothesis (baseado em propriedade) e httpx. Versões em [`requirements.txt`](requirements.txt) e [`pyproject.toml`](pyproject.toml).
 
-**Endpoint `GET /api/consumidores/saude`.** Um novo endpoint inspeciona apenas o estado em memória dos slots (sem tocar na AWS) e devolve, por consumidor, `tipo` (`standard`/`fifo`), `consumer_id`, `vivo`, `degradado` e `reinicios`, mais os agregados `iniciados`, `algum_morto` e `algum_degradado`. Ele permite ao Dashboard distinguir "consumidor encerrado/degradado" de outras falhas.
+## Como rodar e testar
 
-**Extensão opt-in do Visibility_Timeout (desligada por padrão).** Opcionalmente, `processar_mensagem` pode renovar o prazo de visibilidade de uma mensagem recebida via `ChangeMessageVisibility`, dormindo em fatias e renovando entre elas. Esse recurso é **opt-in e vem desligado por padrão**: com a flag desligada, o comportamento é idêntico ao atual e os cenários de expiração proposital continuam demonstrando a reentrega. A extensão **nunca** altera o atributo `Visibility_Timeout` da fila (os 30 s configurados no Console AWS permanecem) — ela age apenas sobre a mensagem recebida — e o cenário `duracao_superior_visibility` ignora a extensão de propósito.
+A implantação completa (criação manual dos recursos no Console AWS + deploy na EC2) está passo a passo em [`IMPLANTACAO.md`](IMPLANTACAO.md). Em resumo, na instância:
 
-**Faixas diferenciadas no Dashboard.** A faixa de status global passou a distinguir, por precedência: **API indisponível** (vermelha, quando estatísticas e monitoramento falham por rede/HTTP), **consumidor em falha** (amarela, quando o endpoint de saúde aponta thread morta ou degradada), **timeout de cálculo** (laranja, quando o backend responde `timeout: true`) e **sucesso**. O estado `Exclusão não confirmada` ganhou destaque próprio na tabela de monitoramento e um contador dedicado por fluxo na visão geral, separado do contador de falhas. Nenhum número é inventado: o endpoint de saúde reflete `thread.is_alive()` real e `exclusao_nao_confirmada` só é gravado depois que a AWS rejeita o delete.
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
-## 10. Tecnologias utilizadas
+A suíte de testes roda **sem tocar na AWS** (tudo com fakes/mocks):
 
-O backend é escrito em **Python** (requer 3.10+) e usa **FastAPI** para a API HTTP, **Uvicorn** como servidor ASGI e **boto3** como SDK oficial da AWS para SQS e DynamoDB. O frontend é um Dashboard em **HTML, CSS e JavaScript** puro, organizado por área funcional (`overview`, `send`, `monitoring`, `history`, `lab`), sem framework pesado, mantendo a aplicação simples de servir diretamente da EC2.
+```bash
+python -m pytest
+```
 
-Os serviços AWS envolvidos são **Amazon SQS** (filas Standard e FIFO, com DLQs e Redrive_Policy), **Amazon DynamoDB** (log de eventos com GSI), **Amazon EC2** (hospedagem), **AWS IAM** (role de privilégio mínimo anexada à instância) e **AWS Systems Manager Session Manager** (administração sem abrir a porta 22). A suíte de testes usa **pytest**, **Hypothesis** (testes baseados em propriedade) e **httpx** (cliente HTTP para testar a API). As versões exatas estão em [`requirements.txt`](requirements.txt) e em [`pyproject.toml`](pyproject.toml).
+Estado atual: **390 testes passando**, incluindo os testes da correção de resiliência FIFO. Detalhes e roteiro de validação em [`TESTES.md`](TESTES.md).
 
-## 11. Funcionamento da aplicação
+---
 
-Na inicialização, a aplicação executa uma verificação de recursos: confirma que as quatro filas, a `Tabela_Historico`, a IAM Role e a EC2 existem e estão acessíveis antes de liberar o Dashboard. Se algum recurso estiver ausente ou inacessível, a inicialização é interrompida sem alterar nada na AWS, e o Dashboard mostra em pt-BR qual recurso falhou, por nome e tipo. A partir daí, o usuário envia de 1 a 10 mensagens por uma única ação, escolhendo fila, `order_id`, Tempo_Processamento_Simulado, cenário de falha e — para FIFO — o `MessageGroupId`. Toda entrada é validada antes de qualquer chamada à AWS; cada envio bem-sucedido registra exatamente um Evento_Observado `enviada`.
-
-Os consumidores recebem as mensagens com Long_Polling, registram o recebimento (com `consumer_id` e contagem de tentativas), **verificam a idempotência por `order_id`** consultando o DynamoDB, aguardam o Tempo_Processamento_Simulado, aplicam o cenário de falha e, só em caso de sucesso, excluem a mensagem e, com a exclusão confirmada, registram `processada` e `excluida` (ver a seção 9.1 para o tratamento de `DeleteMessage` falho). Se o `order_id` já tiver sido processado, o consumidor não repete os efeitos colaterais e registra `recebimento_repetido`; se o `order_id` for inválido ou ausente, rejeita e registra `erro_validacao_order_id`, preservando a mensagem. O Dashboard atualiza estatísticas, monitoramento e a saúde dos consumidores periodicamente, exibe o horário da última atualização bem-sucedida e, se uma atualização falhar, preserva os últimos dados válidos com indicação visível. A faixa de status global diferencia as causas por precedência — API indisponível (vermelha), consumidor em falha (amarela), timeout de cálculo (laranja) e sucesso — conforme descrito na seção 9.1. Exposto à internet, o Dashboard exige login e bloqueia a origem por 300 segundos após 5 tentativas inválidas consecutivas.
-
-## 12. Experimentos realizados
-
-O laboratório de falhas permite executar cenários controlados que cobrem os comportamentos didáticos essenciais do SQS: processamento com sucesso (mensagem `Processada` e excluída); processamento mais longo que o Visibility_Timeout (mensagem volta a ficar visível, contagem de recebimentos incrementada); exceção proposital no consumidor (estado `Falha` com erro registrado); interrupção do consumidor durante o processamento (mensagem preservada e reentregue após o timeout); recebimento repetido (mesma mensagem recebida ao menos duas vezes); encaminhamento para DLQ (após atingir o `maxReceiveCount`); reprocessamento de DLQ (mensagens movidas de volta à fila principal); e comparação lado a lado entre Standard e FIFO.
-
-Cada cenário é observável na prática: o histórico detalhado de uma mensagem mostra sua linha do tempo em ordem cronológica, distinguindo visualmente **Evento_Observado** de **Evento_Inferido**, com horário e fuso. Isso transforma conceitos abstratos (reentrega, redrive, ordenação FIFO, idempotência) em sequências concretas de eventos que o estudante pode inspecionar passo a passo. Os parâmetros de simulação (tempo de processamento, quantidade de mensagens, intervalo de atualização, número de instâncias de consumidor) são ajustáveis pelo Dashboard dentro de faixas validadas, permitindo variar as condições sem tocar no código.
-
-## 13. Resultados
-
-Os resultados aqui descritos são os **efetivamente verificáveis no repositório**, sem presumir métricas de uma execução real na AWS. A principal evidência objetiva é a suíte de testes automatizados: ela cobre a lógica de domínio (derivação de Estado, idempotência, ordenação FIFO, validação de envio e de faixa, classificação de origem de eventos), as camadas de acesso ao SQS e ao DynamoDB, os serviços da API e a composição da aplicação. No ambiente de desenvolvimento, a suíte completa executa com **390 testes passando** (via `python -m pytest`), combinando testes unitários de exemplos e de borda com testes baseados em propriedade (Hypothesis) que exercitam as propriedades de correção descritas no design — incluindo os 12 testes obrigatórios da correção de resiliência FIFO (reordenação `delete`→`processada`, `exclusao_nao_confirmada`, guarda por iteração, supervisão por slots e reentrega sem duplicar efeito de negócio).
-
-Em termos de estrutura entregue, o backend está organizado em módulos coesos sob `app/` (domínio, acesso, API, consumidores e segurança) e o Dashboard em `web/`, com as cinco áreas funcionais implementadas. O comportamento verificável inclui: estado derivado sempre único e dentro do conjunto permitido; estatísticas sempre inteiras e não-negativas, particionadas corretamente entre Standard e FIFO; DLQ nunca inferida apenas por expiração de Visibility_Timeout; eventos sempre listados em ordem cronológica estável; e processamento idempotente por `order_id`. Os passos para reproduzir a execução dos testes estão em [`TESTES.md`](TESTES.md).
-
-## 14. Boas práticas
-
-Do ponto de vista de segurança, o projeto adota **IAM Role na EC2** com privilégio mínimo e **nenhuma Access Key fixa**, administração via **Session Manager** com a **porta 22 fechada**, acesso ao DynamoDB restrito à aplicação (sem endpoint público), **SSE-SQS** para criptografia em repouso das mensagens e autenticação do Dashboard com bloqueio por origem após tentativas inválidas. Esse conjunto reflete recomendações centrais do SAA para proteger credenciais, reduzir a superfície de ataque e criptografar dados.
-
-Do ponto de vista de arquitetura e resiliência, o laboratório demonstra o uso de **DLQ com Redrive_Policy**, **idempotência no consumidor** para lidar com a entrega *at-least-once* das filas Standard, **Long_Polling** para reduzir chamadas vazias, **retenção** diferenciada entre filas principais e DLQs, e um modelo **event-sourced** que separa fatos observados de inferências. Decisões transversais reforçam a honestidade didática: estado sempre derivado (nunca mutável), distinção explícita entre Config_Aplicada e Config_Simulacao, e a regra de nunca marcar DLQ sem confirmação real.
-
-## 15. Lições aprendidas
-
-A lição mais marcante é que **o SQS não guarda o estado por mensagem**. Qualquer dashboard que pretenda mostrar "onde cada mensagem está" precisa de um repositório de observabilidade próprio — aqui, um log de eventos no DynamoDB com o Estado derivado. Tentar inferir estado só a partir das APIs do SQS leva a conclusões erradas, especialmente em torno da DLQ e da expiração do Visibility_Timeout.
-
-A segunda lição é a importância de separar **o que foi observado do que foi inferido**. Reentrega é observável (novo `ReceiveMessage`); expiração de Visibility_Timeout, não (é deduzida). Tratar as duas como iguais produziria uma linha do tempo enganosa. A terceira é que a entrega *at-least-once* das filas Standard torna a **idempotência de negócio** inegociável — e que ela é um conceito distinto da deduplicação de transporte do FIFO. Por fim, modelar bem a chave do DynamoDB (partição por pedido, ordenação por tempo, GSI por fila) desde o começo foi o que viabilizou, com consultas simples, tanto a linha do tempo individual quanto as estatísticas agregadas por fluxo.
-
-## 16. Conclusão
-
-Este laboratório cumpre seu objetivo de ensinar Amazon SQS na prática para o SAA, cobrindo Standard e FIFO, Visibility_Timeout, retenção, Long_Polling, `MessageGroupId`, deduplicação, DLQ e reprocessamento — tudo observável em uma linha do tempo honesta que separa fatos de inferências. A combinação de SQS, DynamoDB como fonte de verdade do estado observável, IAM Role de privilégio mínimo e um Dashboard em pt-BR entrega uma ferramenta de estudo que torna tangíveis conceitos normalmente abstratos.
-
-Como artefato de portfólio, o projeto evidencia domínio tanto dos conceitos de mensageria quanto de boas práticas de arquitetura e segurança na AWS, sustentado por uma suíte de testes automatizados que valida a lógica central. Para aprofundar, consulte [`ARQUITETURA.md`](ARQUITETURA.md), [`IMPLANTACAO.md`](IMPLANTACAO.md) e [`TESTES.md`](TESTES.md).
+Para aprofundar na arquitetura e nas decisões de design, veja [`ARQUITETURA.md`](ARQUITETURA.md). Para o passo a passo de infraestrutura e deploy, [`IMPLANTACAO.md`](IMPLANTACAO.md). Para a estratégia de testes, [`TESTES.md`](TESTES.md).
