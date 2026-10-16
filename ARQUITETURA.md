@@ -40,6 +40,14 @@ Decisões de arquitetura relevantes:
 | Autenticação exclusiva via IAM_Role_EC2 | Boa prática de segurança — sem Access Keys fixas. |
 | Sem NAT Gateway e sem Elastic Load Balancer; administração via Session Manager | Controle de custo e redução da superfície de ataque (porta 22/SSH sem regra de entrada). |
 
+A visão geral da arquitetura, com a VPC, a EC2, as quatro filas SQS (com Redrive Policy), o DynamoDB e os fluxos Standard e FIFO:
+
+![Visão geral da arquitetura do laboratório](<imagens/Visão Geral do Laboratório Amazon SQS.png>)
+
+Uma representação alternativa, destacando subnets, acesso via Session Manager e os componentes opcionais de observabilidade (CloudWatch, EventBridge):
+
+![Arquitetura detalhada com observabilidade](<imagens/imagem (13).png>)
+
 ## Serviços AWS utilizados
 
 | Serviço AWS | Recurso no laboratório | Função |

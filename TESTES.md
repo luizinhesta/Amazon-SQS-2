@@ -23,6 +23,16 @@ Os testes exercitam a aplicação real: envio via `POST /api/mensagens`, cenári
 
 Cada teste a seguir contém os **8 campos obrigatórios**: (1) Objetivo, (2) Pré-requisitos, (3) Configuração, (4) Passo a passo numerado, (5) Resultado esperado, (6) Evidências, (7) Resultado real (a preencher) e (8) Critério de aprovação.
 
+O acesso ao Dashboard começa pela tela de login (com bloqueio por origem após 5 tentativas inválidas):
+
+![Tela de login do Dashboard](<imagens/imagem (15).png>)
+
+Após o login, a área **Visão geral** exibe as estatísticas por fluxo (Standard e FIFO) e os parâmetros de Config_Aplicada e Config_Simulacao:
+
+![Visão geral com estatísticas por fluxo](<imagens/imagem (16).png>)
+![Parâmetros de Config_Aplicada](<imagens/imagem (17).png>)
+![Parâmetros de Config_Simulacao ajustáveis](<imagens/imagem (18).png>)
+
 ---
 
 ## Teste 1 — Fluxo Standard (envio → recebimento → exclusão)
@@ -63,6 +73,18 @@ Validar o caminho feliz do fluxo Standard: uma mensagem enviada à `lab-sqs-stan
 - Tela de **Monitoramento** mostrando a linha no estado **Processada** (ID, Fila, Consumidor, Tentativas = 1, Último evento).
 - Tela de **Histórico detalhado** com a linha do tempo completa (`enviada` → `excluida`).
 - **Visão geral**: incremento em "enviadas" e "processadas" do fluxo Standard e horário da última atualização bem-sucedida.
+
+Área de **Envio de mensagens** (fila de destino, quantidade, `order_id`, tempo de processamento e cenário de falha):
+
+![Área de envio de mensagens](<imagens/imagem (19).png>)
+
+Os cenários de falha disponíveis no envio (sucesso, exceção, interrupção, duração maior que o Visibility_Timeout, recebimento repetido, encaminhamento para a DLQ):
+
+![Cenários de falha disponíveis](<imagens/imagem (26).png>)
+
+Área de **Monitoramento** com uma linha por mensagem e o estado derivado (Processada, Encaminhada para DLQ, etc.):
+
+![Tabela de monitoramento das mensagens](<imagens/imagem (20).png>)
 
 **7. Resultado real** _(a preencher pelo executor após a execução na AWS)_
 
@@ -113,6 +135,10 @@ Demonstrar que, quando o processamento não confirma a exclusão dentro do `Visi
 - Tela da **Visão geral** destacando o `Visibility_Timeout` = 30 s como Config_Aplicada.
 - Tela de **Monitoramento** mostrando a coluna **Tentativas** passando de 1 para 2.
 - Tela de **Histórico detalhado** com o par de eventos: `provavel_expiracao_visibility` (Inferido) → `recebida` (Observado, receive_count = 2).
+
+Exemplo de **Histórico detalhado** de uma mensagem com processamento de 45 s (maior que o Visibility_Timeout de 30 s), evidenciando os eventos Observados da linha do tempo:
+
+![Histórico detalhado — cenário de expiração do Visibility_Timeout](<imagens/imagem (22).png>)
 
 **7. Resultado real** _(a preencher pelo executor após a execução na AWS)_
 
@@ -220,6 +246,10 @@ Validar que mensagens enviadas a um mesmo `MessageGroupId` na fila `lab-sqs-fifo
 - Tela de **comparação por MessageGroupId** mostrando a sequência de processamento `0001 → 0002 → 0003` e o consumidor responsável.
 - Telas de **Histórico detalhado** das 3 mensagens, evidenciando a ordem cronológica dos eventos `recebida`/`processada`.
 
+Exemplo de **Histórico detalhado** de uma mensagem FIFO (`MessageGroupId` = `grupo-A`), com os eventos Observados em ordem cronológica:
+
+![Histórico detalhado de uma mensagem FIFO](<imagens/imagem (21).png>)
+
 **7. Resultado real** _(a preencher pelo executor após a execução na AWS)_
 
 ```
@@ -321,6 +351,10 @@ Validar a recuperação de mensagens: (a) mensagens que reaparecem na fila quand
 - Tela/resposta do **Reprocessar DLQ** indicando as mensagens movidas (nome da DLQ, fila principal e `total_movidas`).
 - Tela de **Histórico detalhado** evidenciando o retorno da mensagem da DLQ e seu novo processamento bem-sucedido.
 - **Visão geral** com os contadores atualizados após a recuperação.
+
+Área **Laboratório de falhas**, com os cenários controlados e o reprocessamento de DLQ (mover mensagens da DLQ de volta à fila principal):
+
+![Laboratório de falhas e reprocessamento de DLQ](<imagens/imagem (24).png>)
 
 **7. Resultado real** _(a preencher pelo executor após a execução na AWS)_
 

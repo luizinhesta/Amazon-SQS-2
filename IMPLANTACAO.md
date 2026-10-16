@@ -88,6 +88,26 @@ A ordem recomendada é criar primeiro as DLQs e depois as filas principais, porq
 7. Clique em **Criar fila** (*Create queue*).
 - **Resultado esperado:** a fila `lab-sqs-fifo.fifo` aparece como FIFO com Visibility timeout 30 s, Long_Polling 20 s, SSE-SQS, deduplicação por conteúdo e Redrive_Policy para `lab-sqs-fifo-dlq.fifo` com maxReceiveCount 2.
 
+Ao final da Parte 1, as **quatro filas** devem aparecer na lista do SQS (duas principais e duas DLQs), com o tipo e a criptografia SSE-SQS corretos:
+
+![Lista das quatro filas SQS criadas](<imagens/imagem (29).png>)
+
+Detalhe e monitoramento da **Fila_Principal_Standard** (`lab-sqs-standard`):
+
+![Detalhes da fila Standard principal](<imagens/imagem (32).png>)
+
+Detalhe e monitoramento da **Fila_Principal_FIFO** (`lab-sqs-fifo.fifo`):
+
+![Detalhes da fila FIFO principal](<imagens/imagem (31).png>)
+
+Monitoramento da **DLQ_Standard** (`lab-sqs-standard-dlq`):
+
+![Monitoramento da DLQ Standard](<imagens/imagem (36).png>)
+
+Monitoramento da **DLQ_FIFO** (`lab-sqs-fifo-dlq.fifo`):
+
+![Monitoramento da DLQ FIFO](<imagens/imagem (30).png>)
+
 > **Tratamento de falha (Parte 1):** se não for possível selecionar a DLQ ao criar a fila principal, confirme que a DLQ foi criada **no mesmo tipo** (Standard com Standard, FIFO com FIFO) e **na mesma região**. SQS exige que a DLQ seja do mesmo tipo da fila principal. Corrija a DLQ antes de prosseguir.
 
 ---
@@ -113,6 +133,14 @@ A Tabela_Historico é um **log de eventos append-only**. O modelo de evento da a
 9. Em **Encryption at rest**, mantenha a chave gerenciada (**Owned by Amazon DynamoDB** ou **AWS managed key**).
 10. Clique em **Create table**.
 - **Resultado esperado:** a tabela `lab-sqs-historico` fica com status **Ativa** (*Active*), chave `PK`/`SK` e o índice `GSI1` com chave `GSI1PK`/`GSI1SK`.
+
+A tabela `lab-sqs-historico` ativa, com chave `PK`/`SK` e um índice secundário:
+
+![Tabela DynamoDB lab-sqs-historico ativa](<imagens/imagem (35).png>)
+
+Quando a aplicação estiver em uso, os itens de evento aparecem na tabela (chave `PEDIDO#...` / `EVENTO#...`, `event_source = OBSERVADO`) — este é o log que serve de fonte de verdade para o estado das mensagens:
+
+![Itens de evento no DynamoDB](<imagens/imagem (33).png>)
 
 > **Observação sobre atributos:** no DynamoDB só se declaram os atributos usados em chaves (`PK`, `SK`, `GSI1PK`, `GSI1SK`). Os demais atributos do item de evento (`order_id`, `queue_name`, `event_type`, `event_source`, `app_time`, `app_time_ms`, `consumer_id`, `receive_count`, `processing_seconds`, `message_group_id`, `sqs_message_id`, `error_detail`) são gravados dinamicamente pela aplicação e **não** precisam ser declarados na criação da tabela.
 
@@ -201,6 +229,10 @@ A arquitetura **não usa NAT Gateway nem Elastic Load Balancer** (para reduzir c
 6. Clique em **Criar grupo de segurança** (*Create security group*).
 - **Resultado esperado:** o Security Group `lab-sqs-sg` permite entrada apenas na porta `8000` a partir das origens autorizadas, sem porta `22` aberta, e permite saída total.
 
+O Security Group `lab-sqs-sg` com as regras de entrada na porta `8000` (sem regra para a porta `22`):
+
+![Security Group lab-sqs-sg com regras de entrada](<imagens/imagem (28).png>)
+
 ### Etapa 9 — Criar a instância EC2
 
 1. Acesse **EC2** → **Instâncias** (*Instances*) → **Executar instâncias** (*Launch instances*).
@@ -215,6 +247,10 @@ A arquitetura **não usa NAT Gateway nem Elastic Load Balancer** (para reduzir c
 7. Em **Detalhes avançados** (*Advanced details*) → **Perfil de instância do IAM** (*IAM instance profile*), selecione `IAM_Role_EC2`.
 8. Clique em **Executar instância** (*Launch instance*).
 - **Resultado esperado:** a instância `lab-sqs-ec2` entra em estado **Em execução** (*Running*), com IP público, usando o perfil `IAM_Role_EC2` e o Security Group `lab-sqs-sg`.
+
+A instância `lab-sqs-ec2` em execução, com IP público, tipo `t3.micro` e o perfil `IAM_Role_EC2` anexado:
+
+![Instância EC2 lab-sqs-ec2 em execução](<imagens/imagem (27).png>)
 
 > **Tratamento de falha (Parte 4):** se a instância não assumir a role, confirme o campo **Perfil de instância do IAM** (*IAM instance profile*). Caso o IP público não apareça, verifique **Atribuir IP público automaticamente** (*Auto-assign public IP*) e as rotas da subnet (deve ter rota de saída para a internet via Internet Gateway).
 
@@ -323,6 +359,10 @@ sudo systemctl status lab-sqs.service
 ```
 
 - **O que faz:** recarrega as units do `systemd`, habilita e inicia o serviço, e mostra seu status. **Por quê:** ativar o serviço e confirmar que subiu. **Resultado esperado:** status **active (running)**.
+
+Exemplo do terminal do **Session Manager** mostrando o serviço `lab-sqs.service` em **active (running)** após o deploy (`cd`, `git pull`, `systemctl restart` e `systemctl status`):
+
+![Serviço lab-sqs.service ativo no Session Manager](<imagens/imagem (34).png>)
 
 > **Tratamento de falha (Parte 6):** se o `uvicorn` encerrar com erro de credenciais da AWS, confirme que a EC2 está com a `IAM_Role_EC2` anexada (Etapa 9). Se o `systemctl status` indicar falha, veja os logs com `journalctl -u lab-sqs.service -n 50`. Se faltar algum recurso AWS, o `/api/saude` identifica o recurso ausente por nome e tipo.
 
@@ -444,6 +484,14 @@ http://<IP_PUBLICO_DA_EC2>:8000/
 ```
 
 - **Resultado esperado:** o Dashboard em pt-BR é exibido (tela de login e as cinco áreas: visão geral, envio, monitoramento, histórico e laboratório de falhas). Se a verificação tiver falhado, a página retorna HTTP 503 com a causa em pt-BR.
+
+Tela de login do Dashboard (com o aviso de bloqueio por origem após tentativas inválidas):
+
+![Tela de login do Dashboard](<imagens/imagem (15).png>)
+
+Após o login, a área **Visão geral** com as estatísticas dos fluxos Standard e FIFO lado a lado:
+
+![Visão geral do Dashboard](<imagens/imagem (16).png>)
 
 3. Confirme os valores de Config_Aplicada no Console AWS:
    - **SQS** → cada fila: tempo limite de visibilidade (Visibility timeout) `30 s` (principais), Long_Polling `20 s`, SSE-SQS habilitado, retenção `4 dias` (principais) / `14 dias` (DLQs), Redrive_Policy com maxReceiveCount `2`, deduplicação por conteúdo nas FIFO.
