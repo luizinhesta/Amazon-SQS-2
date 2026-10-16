@@ -106,7 +106,7 @@ Desktop.ini
 imagens/
 
 # --------------------------------------------------------------------------
-# Observação: a pasta .kiro/ (specs do projeto) É versionada
-# intencionalmente e NÃO deve ser ignorada.
-# O arquivo tasks.md (raiz) É versionado intencionalmente (usado pelo projeto).
+# Specs internas e planos de tarefas — não expostos no repositório público.
 # --------------------------------------------------------------------------
+.kiro/specs/aws-sqs-lab/
+tasks.md
